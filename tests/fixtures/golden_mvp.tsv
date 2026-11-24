@@ -1,0 +1,15 @@
+# Reglas ordenadas del MVP (latín -> castellano simplificado):
+# R1: m > ∅ / _ #                          (pérdida de -m final)
+# R2: u > o / _ #                          (apertura de -u final)
+# R3: [-voiced, +stop] > [+voiced] / V _ V (sonorización intervocálica: p>b, t>d, k>g)
+# R4: f > h / # _ V                        (aspiración de f- inicial ante vocal)
+#
+# Formato: entrada_segmentos	salida_esperada	reglas_disparadas	glosa
+v i t a m	v i d a	R1,R3	vitam -> vida
+f a t a m	h a d a	R1,R3,R4	fatam -> hada
+a m i k u m	a m i g o	R1,R2,R3	amicum -> amigo
+f i k u m	h i g o	R1,R2,R3,R4	ficum -> higo
+l a k u m	l a g o	R1,R2,R3	lacum -> lago
+k u p a m	k u b a	R1,R3	cupam -> cuba (k- inicial no sonoriza)
+k a s a m	k a s a	R1	casam -> casa (k- inicial no sonoriza)
+f a r i n a m	h a r i n a	R1,R4	farinam -> harina
