@@ -32,8 +32,6 @@ body:
       # every form in this folder: add a milestone to all of them when it is
       # created, and drop it from all of them when it closes.
       options:
-        - "M0: Repository setup"
-        - "M1: Core phonology and engine"
         - "M2: DSL parser and maximal munch"
         - "M3: Dialect trees and directional rules"
         - "M4: CLI and export formats"
