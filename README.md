@@ -49,16 +49,30 @@ cargo test
 ├── SPEC.md
 ├── clippy.toml
 ├── src/
-│   └── main.rs
+│   ├── engine/
+│   │   ├── applier.rs
+│   │   ├── error.rs
+│   │   ├── mod.rs
+│   │   ├── rule.rs
+│   │   └── trace.rs
+│   ├── lib.rs
+│   ├── main.rs
+│   └── phonology/
+│       ├── features.rs
+│       ├── inventory.rs
+│       ├── mod.rs
+│       ├── pattern.rs
+│       └── segment.rs
 └── tests/
-    └── fixtures/
-        └── golden_mvp.tsv
+    ├── fixtures/
+    │   └── golden_mvp.tsv
+    └── golden_mvp.rs
 ```
 
 ## Roadmap
 
 - [x] **M0**: Repository setup (CI, templates, license, and base documentation).
-- [ ] **M1**: Core phonology (`src/phonology/`) and rule engine (`src/engine/`) with golden MVP tests.
+- [x] **M1**: Core phonology (`src/phonology/`) and rule engine (`src/engine/`) with golden MVP tests.
 - [ ] **M2**: DSL lexer/parser (`src/dsl/`) and maximal-munch tokenizer.
 - [ ] **M3**: Dialect trees, chronological stages, directional modes, and non-local contexts.
 - [ ] **M4**: CLI (`src/cli/`) with `clap` and Markdown/JSON export.
