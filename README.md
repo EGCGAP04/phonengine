@@ -49,6 +49,12 @@ cargo test
 ├── SPEC.md
 ├── clippy.toml
 ├── src/
+│   ├── dsl/
+│   │   ├── error.rs
+│   │   ├── lexer.rs
+│   │   ├── mod.rs
+│   │   ├── parser.rs
+│   │   └── tokenizer.rs
 │   ├── engine/
 │   │   ├── applier.rs
 │   │   ├── error.rs
@@ -64,6 +70,7 @@ cargo test
 │       ├── pattern.rs
 │       └── segment.rs
 └── tests/
+    ├── dsl_mvp.rs
     ├── fixtures/
     │   └── golden_mvp.tsv
     └── golden_mvp.rs
@@ -73,7 +80,7 @@ cargo test
 
 - [x] **M0**: Repository setup (CI, templates, license, and base documentation).
 - [x] **M1**: Core phonology (`src/phonology/`) and rule engine (`src/engine/`) with golden MVP tests.
-- [ ] **M2**: DSL lexer/parser (`src/dsl/`) and maximal-munch tokenizer.
+- [x] **M2**: DSL lexer/parser (`src/dsl/`) and maximal-munch tokenizer.
 - [ ] **M3**: Dialect trees, chronological stages, directional modes, and non-local contexts.
 - [ ] **M4**: CLI (`src/cli/`) with `clap` and Markdown/JSON export.
 

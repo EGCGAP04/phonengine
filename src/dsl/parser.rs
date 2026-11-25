@@ -1,0 +1,1513 @@
+//! Manual recursive-descent parser for the PhonEngine phonological rule DSL.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::engine::{
+    ApplicationMode, ContextElement, NaturalClass, Pattern, ReplacementItem, Rule,
+};
+use crate::phonology::{
+    Backness, FeatureBundle, FeatureMutation, FeaturePattern, FieldMatch, FieldUpdate, Height,
+    Inventory, Manner, Place,
+};
+
+use super::error::{DslError, DslErrorKind, Span};
+use super::lexer::{Token, TokenKind, lex};
+
+/// Complete parsed DSL program containing an optional inventory, natural classes, and rules.
+#[derive(Debug, Clone, Default)]
+pub struct Program {
+    /// Segment inventory populated from `segment` declarations (empty if none are present).
+    pub inventory: Inventory,
+    /// Declared natural classes keyed deterministically by name.
+    pub classes: BTreeMap<String, NaturalClass>,
+    /// Ordered phonological rules validated by [`Rule::new`].
+    pub rules: Vec<Rule>,
+    symbol_refs: Vec<(String, Span)>,
+}
+
+impl PartialEq for Program {
+    fn eq(&self, other: &Self) -> bool {
+        self.inventory == other.inventory
+            && self.classes == other.classes
+            && self.rules == other.rules
+    }
+}
+
+impl Eq for Program {}
+
+impl Program {
+    /// Validates that every literal segment symbol referenced in `class` declarations,
+    /// target/context patterns, and literal replacements exists in `inventory`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DslError`] with [`DslErrorKind::UnknownSymbol`] at the first unmapped symbol's
+    /// source [`Span`].
+    pub fn validate_against(&self, inventory: &Inventory) -> Result<(), DslError> {
+        for (symbol, span) in &self.symbol_refs {
+            if inventory.get(symbol).is_none() {
+                return Err(DslError::new(
+                    DslErrorKind::UnknownSymbol(symbol.clone()),
+                    *span,
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Parses a PhonEngine DSL source string into a validated [`Program`].
+///
+/// # Errors
+///
+/// Returns a positioned [`DslError`] on lexical, syntactic, or semantic validation failure.
+pub fn parse_program(source: &str) -> Result<Program, DslError> {
+    let tokens = lex(source)?;
+    let mut parser = Parser::new(tokens);
+    parser.parse_program()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeatureField {
+    Manner,
+    Place,
+    Height,
+    Backness,
+    Voiced,
+    Aspirated,
+    Palatalized,
+    Labialized,
+    Rounded,
+    Syllabic,
+    Long,
+}
+
+impl FeatureField {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Manner => "manner",
+            Self::Place => "place",
+            Self::Height => "height",
+            Self::Backness => "backness",
+            Self::Voiced => "voiced",
+            Self::Aspirated => "aspirated",
+            Self::Palatalized => "palatalized",
+            Self::Labialized => "labialized",
+            Self::Rounded => "rounded",
+            Self::Syllabic => "syllabic",
+            Self::Long => "long",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeatureValue {
+    Manner(Manner),
+    Place(Option<Place>),
+    Height(Option<Height>),
+    Backness(Option<Backness>),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FeatureEntry {
+    field: FeatureField,
+    value: FeatureValue,
+    span: Span,
+}
+
+impl FeatureEntry {
+    const fn new(field: FeatureField, value: FeatureValue, span: Span) -> Self {
+        Self { field, value, span }
+    }
+}
+
+enum EnumVariant {
+    Manner(Manner),
+    Place(Place),
+    Height(Height),
+    Backness(Backness),
+}
+
+impl EnumVariant {
+    const fn field(&self) -> FeatureField {
+        match self {
+            Self::Manner(_) => FeatureField::Manner,
+            Self::Place(_) => FeatureField::Place,
+            Self::Height(_) => FeatureField::Height,
+            Self::Backness(_) => FeatureField::Backness,
+        }
+    }
+
+    const fn into_value(self) -> FeatureValue {
+        match self {
+            Self::Manner(m) => FeatureValue::Manner(m),
+            Self::Place(p) => FeatureValue::Place(Some(p)),
+            Self::Height(h) => FeatureValue::Height(Some(h)),
+            Self::Backness(b) => FeatureValue::Backness(Some(b)),
+        }
+    }
+}
+
+fn parse_manner(name: &str) -> Option<Manner> {
+    match name {
+        "stop" => Some(Manner::Stop),
+        "fricative" => Some(Manner::Fricative),
+        "affricate" => Some(Manner::Affricate),
+        "nasal" => Some(Manner::Nasal),
+        "lateral" => Some(Manner::Lateral),
+        "rhotic" => Some(Manner::Rhotic),
+        "approximant" => Some(Manner::Approximant),
+        "vowel" => Some(Manner::Vowel),
+        _ => None,
+    }
+}
+
+fn parse_place(name: &str) -> Option<Place> {
+    match name {
+        "bilabial" => Some(Place::Bilabial),
+        "labiodental" => Some(Place::Labiodental),
+        "dental" => Some(Place::Dental),
+        "alveolar" => Some(Place::Alveolar),
+        "postalveolar" => Some(Place::Postalveolar),
+        "palatal" => Some(Place::Palatal),
+        "velar" => Some(Place::Velar),
+        "uvular" => Some(Place::Uvular),
+        "pharyngeal" => Some(Place::Pharyngeal),
+        "glottal" => Some(Place::Glottal),
+        _ => None,
+    }
+}
+
+fn parse_height(name: &str) -> Option<Height> {
+    match name {
+        "high" => Some(Height::High),
+        "mid-high" => Some(Height::MidHigh),
+        "mid-low" => Some(Height::MidLow),
+        "low" => Some(Height::Low),
+        _ => None,
+    }
+}
+
+fn parse_backness(name: &str) -> Option<Backness> {
+    match name {
+        "front" => Some(Backness::Front),
+        "central" => Some(Backness::Central),
+        "back" => Some(Backness::Back),
+        _ => None,
+    }
+}
+
+fn parse_enum_variant(name: &str) -> Option<EnumVariant> {
+    if let Some(m) = parse_manner(name) {
+        return Some(EnumVariant::Manner(m));
+    }
+    if let Some(p) = parse_place(name) {
+        return Some(EnumVariant::Place(p));
+    }
+    if let Some(h) = parse_height(name) {
+        return Some(EnumVariant::Height(h));
+    }
+    if let Some(b) = parse_backness(name) {
+        return Some(EnumVariant::Backness(b));
+    }
+    None
+}
+
+fn parse_bool_field(name: &str) -> Option<FeatureField> {
+    match name {
+        "voiced" => Some(FeatureField::Voiced),
+        "aspirated" => Some(FeatureField::Aspirated),
+        "palatalized" => Some(FeatureField::Palatalized),
+        "labialized" => Some(FeatureField::Labialized),
+        "rounded" => Some(FeatureField::Rounded),
+        "syllabic" => Some(FeatureField::Syllabic),
+        "long" => Some(FeatureField::Long),
+        _ => None,
+    }
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    cursor: usize,
+    inventory: Inventory,
+    classes: BTreeMap<String, NaturalClass>,
+    rules: Vec<Rule>,
+    rule_ids: BTreeSet<String>,
+    symbol_refs: Vec<(String, Span)>,
+}
+
+impl Parser {
+    fn new(tokens: Vec<Token>) -> Self {
+        Self {
+            tokens,
+            cursor: 0,
+            inventory: Inventory::new(),
+            classes: BTreeMap::new(),
+            rules: Vec::new(),
+            rule_ids: BTreeSet::new(),
+            symbol_refs: Vec::new(),
+        }
+    }
+
+    fn peek(&self) -> &Token {
+        self.tokens
+            .get(self.cursor)
+            .or_else(|| self.tokens.last())
+            .unwrap_or(&EOF_TOKEN)
+    }
+
+    fn peek_kind(&self) -> &TokenKind {
+        &self.peek().kind
+    }
+
+    fn advance(&mut self) -> Token {
+        if self.cursor < self.tokens.len() {
+            let tok = self.tokens[self.cursor].clone();
+            if tok.kind != TokenKind::Eof {
+                self.cursor += 1;
+            }
+            tok
+        } else {
+            EOF_TOKEN.clone()
+        }
+    }
+
+    fn skip_newlines(&mut self) {
+        while matches!(self.peek_kind(), TokenKind::Newline) {
+            self.advance();
+        }
+    }
+
+    fn expect_line_end(&mut self) -> Result<(), DslError> {
+        match self.peek_kind() {
+            TokenKind::Newline | TokenKind::Eof => {
+                self.skip_newlines();
+                Ok(())
+            }
+            other => Err(DslError::new(
+                DslErrorKind::UnexpectedToken {
+                    expected: "end of line".to_owned(),
+                    found: other.to_string(),
+                },
+                self.peek().span,
+            )),
+        }
+    }
+
+    fn expect_ident(&mut self, expected: &str) -> Result<(String, Span), DslError> {
+        let tok = self.peek().clone();
+        match tok.kind {
+            TokenKind::Ident(name) => {
+                self.advance();
+                Ok((name, tok.span))
+            }
+            TokenKind::Eof => Err(DslError::new(
+                DslErrorKind::UnexpectedEof {
+                    expected: expected.to_owned(),
+                },
+                tok.span,
+            )),
+            other => Err(DslError::new(
+                DslErrorKind::UnexpectedToken {
+                    expected: expected.to_owned(),
+                    found: other.to_string(),
+                },
+                tok.span,
+            )),
+        }
+    }
+
+    fn expect_token(
+        &mut self,
+        expected_kind: &TokenKind,
+        expected_desc: &str,
+    ) -> Result<Span, DslError> {
+        let tok = self.peek().clone();
+        if &tok.kind == expected_kind {
+            self.advance();
+            Ok(tok.span)
+        } else if tok.kind == TokenKind::Eof {
+            Err(DslError::new(
+                DslErrorKind::UnexpectedEof {
+                    expected: expected_desc.to_owned(),
+                },
+                tok.span,
+            ))
+        } else {
+            Err(DslError::new(
+                DslErrorKind::UnexpectedToken {
+                    expected: expected_desc.to_owned(),
+                    found: tok.kind.to_string(),
+                },
+                tok.span,
+            ))
+        }
+    }
+
+    fn parse_program(&mut self) -> Result<Program, DslError> {
+        loop {
+            self.skip_newlines();
+            match self.peek_kind() {
+                TokenKind::Eof => break,
+                TokenKind::Segment => self.parse_segment_decl()?,
+                TokenKind::Class => self.parse_class_decl()?,
+                TokenKind::Rule => self.parse_rule_decl()?,
+                other => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedToken {
+                            expected: "'segment', 'class', or 'rule' declaration".to_owned(),
+                            found: other.to_string(),
+                        },
+                        self.peek().span,
+                    ));
+                }
+            }
+        }
+
+        Ok(Program {
+            inventory: std::mem::take(&mut self.inventory),
+            classes: std::mem::take(&mut self.classes),
+            rules: std::mem::take(&mut self.rules),
+            symbol_refs: std::mem::take(&mut self.symbol_refs),
+        })
+    }
+
+    fn parse_segment_decl(&mut self) -> Result<(), DslError> {
+        let kw_span = self.advance().span;
+        let (symbol, _) = self.expect_ident("segment symbol")?;
+        self.expect_token(&TokenKind::Equals, "'='")?;
+        let (entries, block_span) = self.parse_feature_entries(true)?;
+        self.expect_line_end()?;
+
+        let mut manner: Option<Manner> = None;
+        for entry in &entries {
+            if entry.field == FeatureField::Manner
+                && let FeatureValue::Manner(m) = entry.value
+            {
+                manner = Some(m);
+            }
+        }
+        let Some(manner) = manner else {
+            return Err(DslError::new(
+                DslErrorKind::MissingManner { symbol },
+                block_span,
+            ));
+        };
+
+        let is_vowel = manner == Manner::Vowel;
+        let mut bundle = FeatureBundle {
+            manner,
+            place: None,
+            height: None,
+            backness: None,
+            voiced: is_vowel,
+            aspirated: false,
+            palatalized: false,
+            labialized: false,
+            rounded: false,
+            syllabic: is_vowel,
+            long: false,
+        };
+
+        for entry in entries {
+            match (entry.field, entry.value) {
+                (FeatureField::Manner, FeatureValue::Manner(m)) => bundle.manner = m,
+                (FeatureField::Place, FeatureValue::Place(p)) => bundle.place = p,
+                (FeatureField::Height, FeatureValue::Height(h)) => bundle.height = h,
+                (FeatureField::Backness, FeatureValue::Backness(b)) => bundle.backness = b,
+                (FeatureField::Voiced, FeatureValue::Bool(v)) => bundle.voiced = v,
+                (FeatureField::Aspirated, FeatureValue::Bool(v)) => bundle.aspirated = v,
+                (FeatureField::Palatalized, FeatureValue::Bool(v)) => bundle.palatalized = v,
+                (FeatureField::Labialized, FeatureValue::Bool(v)) => bundle.labialized = v,
+                (FeatureField::Rounded, FeatureValue::Bool(v)) => bundle.rounded = v,
+                (FeatureField::Syllabic, FeatureValue::Bool(v)) => bundle.syllabic = v,
+                (FeatureField::Long, FeatureValue::Bool(v)) => bundle.long = v,
+                _ => {}
+            }
+        }
+
+        let decl_span = kw_span.merge(block_span);
+        self.inventory
+            .insert(symbol, bundle)
+            .map_err(|err| DslError::new(DslErrorKind::InventoryError(err), decl_span))
+    }
+
+    fn parse_class_decl(&mut self) -> Result<(), DslError> {
+        self.advance();
+        let (name, name_span) = self.expect_ident("natural class name")?;
+        if self.classes.contains_key(&name) {
+            return Err(DslError::new(DslErrorKind::DuplicateClass(name), name_span));
+        }
+
+        self.expect_token(&TokenKind::Equals, "'='")?;
+        let open_span = self.expect_token(&TokenKind::LBrace, "'{'")?;
+
+        let mut members = BTreeSet::new();
+        loop {
+            self.skip_newlines();
+            if matches!(self.peek_kind(), TokenKind::RBrace) {
+                break;
+            }
+            let (member, member_span) = self.expect_ident("segment symbol")?;
+            if !members.insert(member.clone()) {
+                return Err(DslError::new(
+                    DslErrorKind::DuplicateClassMember {
+                        class: name,
+                        symbol: member,
+                    },
+                    member_span,
+                ));
+            }
+            self.symbol_refs.push((member, member_span));
+
+            self.skip_newlines();
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        self.skip_newlines();
+        let close_span = self.expect_token(&TokenKind::RBrace, "'}'")?;
+        self.expect_line_end()?;
+
+        if members.is_empty() {
+            return Err(DslError::new(
+                DslErrorKind::EmptyClass(name),
+                open_span.merge(close_span),
+            ));
+        }
+
+        self.classes.insert(
+            name.clone(),
+            NaturalClass {
+                name: name.clone(),
+                members,
+            },
+        );
+        Ok(())
+    }
+
+    fn parse_rule_decl(&mut self) -> Result<(), DslError> {
+        let kw_span = self.advance().span;
+        let (id, id_span) = self.expect_ident("rule identifier")?;
+        if !self.rule_ids.insert(id.clone()) {
+            return Err(DslError::new(DslErrorKind::DuplicateRuleId(id), id_span));
+        }
+
+        let name = if let TokenKind::StringLit(label) = self.peek_kind().clone() {
+            self.advance();
+            label
+        } else {
+            id.clone()
+        };
+
+        let mode = if matches!(self.peek_kind(), TokenKind::LParen) {
+            self.advance();
+            let (mode_name, mode_span) = self.expect_ident("application mode")?;
+            self.expect_token(&TokenKind::RParen, "')'")?;
+            match mode_name.as_str() {
+                "simultaneous" => ApplicationMode::Simultaneous,
+                "left-to-right" => ApplicationMode::LeftToRight,
+                "right-to-left" => ApplicationMode::RightToLeft,
+                _ => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnknownApplicationMode(mode_name),
+                        mode_span,
+                    ));
+                }
+            }
+        } else {
+            ApplicationMode::Simultaneous
+        };
+
+        self.expect_token(&TokenKind::Colon, "':'")?;
+        self.skip_newlines();
+
+        let (target, target_span) = self.parse_rule_target()?;
+        self.expect_token(&TokenKind::Gt, "'>'")?;
+        let (replacement, repl_span) = self.parse_rule_replacement(target.len())?;
+
+        let (left_context, right_context, end_span) =
+            if matches!(self.peek_kind(), TokenKind::Slash) {
+                self.parse_rule_context()?
+            } else {
+                (Vec::new(), Vec::new(), repl_span)
+            };
+
+        self.expect_line_end()?;
+
+        let rule_span = kw_span.merge(target_span).merge(end_span);
+        let rule = Rule::new(
+            id,
+            name,
+            target,
+            replacement,
+            left_context,
+            right_context,
+            mode,
+        )
+        .map_err(|err| DslError::new(DslErrorKind::InvalidRule(err), rule_span))?;
+        self.rules.push(rule);
+        Ok(())
+    }
+
+    fn parse_rule_target(&mut self) -> Result<(Vec<Pattern>, Span), DslError> {
+        let mut patterns = Vec::new();
+        let mut saw_empty = false;
+        let mut combined_span: Option<Span> = None;
+
+        while !matches!(self.peek_kind(), TokenKind::Gt) {
+            let tok = self.peek().clone();
+            match tok.kind {
+                TokenKind::Empty => {
+                    self.advance();
+                    if !patterns.is_empty() || saw_empty {
+                        return Err(DslError::new(DslErrorKind::EmptyMixedWithItems, tok.span));
+                    }
+                    saw_empty = true;
+                    combined_span = Some(match combined_span {
+                        Some(prev) => prev.merge(tok.span),
+                        None => tok.span,
+                    });
+                }
+                TokenKind::Ident(_) | TokenKind::LBracket => {
+                    if saw_empty {
+                        return Err(DslError::new(DslErrorKind::EmptyMixedWithItems, tok.span));
+                    }
+                    let (pattern, pat_span) = self.parse_pattern()?;
+                    patterns.push(pattern);
+                    combined_span = Some(match combined_span {
+                        Some(prev) => prev.merge(pat_span),
+                        None => pat_span,
+                    });
+                }
+                TokenKind::Newline => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedToken {
+                            expected: "'>'".to_owned(),
+                            found: tok.kind.to_string(),
+                        },
+                        tok.span,
+                    ));
+                }
+                TokenKind::Eof => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedEof {
+                            expected: "'>'".to_owned(),
+                        },
+                        tok.span,
+                    ));
+                }
+                other => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedToken {
+                            expected: "target pattern, '∅', or '>'".to_owned(),
+                            found: other.to_string(),
+                        },
+                        tok.span,
+                    ));
+                }
+            }
+        }
+
+        let Some(span) = combined_span else {
+            return Err(DslError::new(
+                DslErrorKind::UnexpectedToken {
+                    expected: "target pattern or '∅'".to_owned(),
+                    found: self.peek_kind().to_string(),
+                },
+                self.peek().span,
+            ));
+        };
+        Ok((patterns, span))
+    }
+
+    fn parse_rule_replacement(
+        &mut self,
+        target_len: usize,
+    ) -> Result<(Vec<ReplacementItem>, Span), DslError> {
+        let mut items = Vec::new();
+        let mut saw_empty = false;
+        let mut combined_span: Option<Span> = None;
+
+        while !matches!(
+            self.peek_kind(),
+            TokenKind::Slash | TokenKind::Newline | TokenKind::Eof
+        ) {
+            let tok = self.peek().clone();
+            match tok.kind {
+                TokenKind::Empty => {
+                    self.advance();
+                    if !items.is_empty() || saw_empty {
+                        return Err(DslError::new(DslErrorKind::EmptyMixedWithItems, tok.span));
+                    }
+                    saw_empty = true;
+                    combined_span = Some(match combined_span {
+                        Some(prev) => prev.merge(tok.span),
+                        None => tok.span,
+                    });
+                }
+                TokenKind::Ident(sym) => {
+                    if saw_empty {
+                        return Err(DslError::new(DslErrorKind::EmptyMixedWithItems, tok.span));
+                    }
+                    self.advance();
+                    if self.classes.contains_key(&sym) {
+                        return Err(DslError::new(
+                            DslErrorKind::ClassInReplacement(sym),
+                            tok.span,
+                        ));
+                    }
+                    self.symbol_refs.push((sym.clone(), tok.span));
+                    items.push(ReplacementItem::Literal(sym));
+                    combined_span = Some(match combined_span {
+                        Some(prev) => prev.merge(tok.span),
+                        None => tok.span,
+                    });
+                }
+                TokenKind::SourceRef(reference) => {
+                    if saw_empty {
+                        return Err(DslError::new(DslErrorKind::EmptyMixedWithItems, tok.span));
+                    }
+                    self.advance();
+                    if reference == 0 || reference > target_len {
+                        return Err(DslError::new(
+                            DslErrorKind::InvalidSourceIndex {
+                                reference,
+                                target_len,
+                            },
+                            tok.span,
+                        ));
+                    }
+                    let (mutation, item_span) = if matches!(self.peek_kind(), TokenKind::LBracket)
+                        && self.peek().span.start == tok.span.end
+                    {
+                        let (mut_spec, mut_span) = self.parse_feature_mutation(false)?;
+                        (mut_spec, tok.span.merge(mut_span))
+                    } else {
+                        (FeatureMutation::new(), tok.span)
+                    };
+                    items.push(ReplacementItem::Mutate {
+                        source_index: reference - 1,
+                        mutation,
+                    });
+                    combined_span = Some(match combined_span {
+                        Some(prev) => prev.merge(item_span),
+                        None => item_span,
+                    });
+                }
+                TokenKind::LBracket => {
+                    if saw_empty {
+                        return Err(DslError::new(DslErrorKind::EmptyMixedWithItems, tok.span));
+                    }
+                    if target_len != 1 {
+                        return Err(DslError::new(
+                            DslErrorKind::AmbiguousImplicitMutation { target_len },
+                            tok.span,
+                        ));
+                    }
+                    let (mutation, mut_span) = self.parse_feature_mutation(false)?;
+                    items.push(ReplacementItem::Mutate {
+                        source_index: 0,
+                        mutation,
+                    });
+                    combined_span = Some(match combined_span {
+                        Some(prev) => prev.merge(mut_span),
+                        None => mut_span,
+                    });
+                }
+                other => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedToken {
+                            expected: "replacement literal, '$k', '[...]', or '∅'".to_owned(),
+                            found: other.to_string(),
+                        },
+                        tok.span,
+                    ));
+                }
+            }
+        }
+
+        let Some(span) = combined_span else {
+            return Err(DslError::new(
+                DslErrorKind::UnexpectedToken {
+                    expected: "replacement pattern or '∅'".to_owned(),
+                    found: self.peek_kind().to_string(),
+                },
+                self.peek().span,
+            ));
+        };
+        Ok((items, span))
+    }
+
+    fn parse_rule_context(
+        &mut self,
+    ) -> Result<(Vec<ContextElement>, Vec<ContextElement>, Span), DslError> {
+        let slash_span = self.advance().span;
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        let mut saw_focus = false;
+        let mut last_span = slash_span;
+
+        while !matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Eof) {
+            let tok = self.peek().clone();
+            match tok.kind {
+                TokenKind::Underscore => {
+                    self.advance();
+                    if saw_focus {
+                        return Err(DslError::new(DslErrorKind::DuplicateContextFocus, tok.span));
+                    }
+                    saw_focus = true;
+                    last_span = tok.span;
+                }
+                TokenKind::Hash => {
+                    self.advance();
+                    if matches!(self.peek_kind(), TokenKind::Star) {
+                        return Err(DslError::new(
+                            DslErrorKind::UnexpectedToken {
+                                expected: "pattern before '*'".to_owned(),
+                                found: "'#'".to_owned(),
+                            },
+                            tok.span.merge(self.peek().span),
+                        ));
+                    }
+                    let dest = if saw_focus { &mut right } else { &mut left };
+                    dest.push(ContextElement::WordBoundary);
+                    last_span = tok.span;
+                }
+                TokenKind::Ident(_) | TokenKind::LBracket => {
+                    let (pattern, pat_span) = self.parse_pattern()?;
+                    let (elem, elem_span) = if matches!(self.peek_kind(), TokenKind::Star) {
+                        let star_span = self.advance().span;
+                        (
+                            ContextElement::ZeroOrMore(pattern),
+                            pat_span.merge(star_span),
+                        )
+                    } else {
+                        (ContextElement::Segment(pattern), pat_span)
+                    };
+                    let dest = if saw_focus { &mut right } else { &mut left };
+                    dest.push(elem);
+                    last_span = elem_span;
+                }
+                other => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedToken {
+                            expected: "context element ('#', pattern, or '_')".to_owned(),
+                            found: other.to_string(),
+                        },
+                        tok.span,
+                    ));
+                }
+            }
+        }
+
+        if !saw_focus {
+            return Err(DslError::new(DslErrorKind::MissingContextFocus, last_span));
+        }
+
+        Ok((left, right, last_span))
+    }
+
+    fn parse_pattern(&mut self) -> Result<(Pattern, Span), DslError> {
+        let tok = self.peek().clone();
+        match tok.kind {
+            TokenKind::Ident(sym) => {
+                self.advance();
+                if let Some(class) = self.classes.get(&sym) {
+                    Ok((Pattern::Class(class.clone()), tok.span))
+                } else {
+                    self.symbol_refs.push((sym.clone(), tok.span));
+                    Ok((Pattern::Literal(sym), tok.span))
+                }
+            }
+            TokenKind::LBracket => {
+                let (fp, span) = self.parse_feature_pattern(false)?;
+                Ok((Pattern::Features(fp), span))
+            }
+            TokenKind::Eof => Err(DslError::new(
+                DslErrorKind::UnexpectedEof {
+                    expected: "pattern or feature block '[...]'".to_owned(),
+                },
+                tok.span,
+            )),
+            other => Err(DslError::new(
+                DslErrorKind::UnexpectedToken {
+                    expected: "pattern or feature block '[...]'".to_owned(),
+                    found: other.to_string(),
+                },
+                tok.span,
+            )),
+        }
+    }
+
+    fn parse_feature_pattern(
+        &mut self,
+        allow_newlines: bool,
+    ) -> Result<(FeaturePattern, Span), DslError> {
+        let (entries, span) = self.parse_feature_entries(allow_newlines)?;
+        let mut pattern = FeaturePattern::new();
+        for entry in entries {
+            match (entry.field, entry.value) {
+                (FeatureField::Manner, FeatureValue::Manner(m)) => pattern.manner = Some(m),
+                (FeatureField::Place, FeatureValue::Place(Some(p))) => {
+                    pattern.place = FieldMatch::Is(p);
+                }
+                (FeatureField::Place, FeatureValue::Place(None)) => {
+                    pattern.place = FieldMatch::IsNone;
+                }
+                (FeatureField::Height, FeatureValue::Height(Some(h))) => {
+                    pattern.height = FieldMatch::Is(h);
+                }
+                (FeatureField::Height, FeatureValue::Height(None)) => {
+                    pattern.height = FieldMatch::IsNone;
+                }
+                (FeatureField::Backness, FeatureValue::Backness(Some(b))) => {
+                    pattern.backness = FieldMatch::Is(b);
+                }
+                (FeatureField::Backness, FeatureValue::Backness(None)) => {
+                    pattern.backness = FieldMatch::IsNone;
+                }
+                (FeatureField::Voiced, FeatureValue::Bool(v)) => pattern.voiced = Some(v),
+                (FeatureField::Aspirated, FeatureValue::Bool(v)) => pattern.aspirated = Some(v),
+                (FeatureField::Palatalized, FeatureValue::Bool(v)) => pattern.palatalized = Some(v),
+                (FeatureField::Labialized, FeatureValue::Bool(v)) => pattern.labialized = Some(v),
+                (FeatureField::Rounded, FeatureValue::Bool(v)) => pattern.rounded = Some(v),
+                (FeatureField::Syllabic, FeatureValue::Bool(v)) => pattern.syllabic = Some(v),
+                (FeatureField::Long, FeatureValue::Bool(v)) => pattern.long = Some(v),
+                _ => {}
+            }
+        }
+        Ok((pattern, span))
+    }
+
+    fn parse_feature_mutation(
+        &mut self,
+        allow_newlines: bool,
+    ) -> Result<(FeatureMutation, Span), DslError> {
+        let (entries, span) = self.parse_feature_entries(allow_newlines)?;
+        let mut mutation = FeatureMutation::new();
+        for entry in entries {
+            match (entry.field, entry.value) {
+                (FeatureField::Manner, FeatureValue::Manner(m)) => mutation.manner = Some(m),
+                (FeatureField::Place, FeatureValue::Place(Some(p))) => {
+                    mutation.place = FieldUpdate::Set(p);
+                }
+                (FeatureField::Place, FeatureValue::Place(None)) => {
+                    mutation.place = FieldUpdate::Clear;
+                }
+                (FeatureField::Height, FeatureValue::Height(Some(h))) => {
+                    mutation.height = FieldUpdate::Set(h);
+                }
+                (FeatureField::Height, FeatureValue::Height(None)) => {
+                    mutation.height = FieldUpdate::Clear;
+                }
+                (FeatureField::Backness, FeatureValue::Backness(Some(b))) => {
+                    mutation.backness = FieldUpdate::Set(b);
+                }
+                (FeatureField::Backness, FeatureValue::Backness(None)) => {
+                    mutation.backness = FieldUpdate::Clear;
+                }
+                (FeatureField::Voiced, FeatureValue::Bool(v)) => mutation.voiced = Some(v),
+                (FeatureField::Aspirated, FeatureValue::Bool(v)) => mutation.aspirated = Some(v),
+                (FeatureField::Palatalized, FeatureValue::Bool(v)) => {
+                    mutation.palatalized = Some(v);
+                }
+                (FeatureField::Labialized, FeatureValue::Bool(v)) => {
+                    mutation.labialized = Some(v);
+                }
+                (FeatureField::Rounded, FeatureValue::Bool(v)) => mutation.rounded = Some(v),
+                (FeatureField::Syllabic, FeatureValue::Bool(v)) => mutation.syllabic = Some(v),
+                (FeatureField::Long, FeatureValue::Bool(v)) => mutation.long = Some(v),
+                _ => {}
+            }
+        }
+        Ok((mutation, span))
+    }
+
+    fn parse_feature_entries(
+        &mut self,
+        allow_newlines: bool,
+    ) -> Result<(Vec<FeatureEntry>, Span), DslError> {
+        let open_span = self.expect_token(&TokenKind::LBracket, "'['")?;
+        let mut entries = Vec::new();
+        let mut seen_fields = BTreeSet::new();
+
+        loop {
+            if allow_newlines {
+                self.skip_newlines();
+            }
+            if matches!(self.peek_kind(), TokenKind::RBracket) {
+                break;
+            }
+
+            let entry = self.parse_single_feature()?;
+            if !seen_fields.insert(entry.field.name()) {
+                return Err(DslError::new(
+                    DslErrorKind::DuplicateFeature(entry.field.name().to_owned()),
+                    entry.span,
+                ));
+            }
+            entries.push(entry);
+
+            if allow_newlines {
+                self.skip_newlines();
+            }
+            if matches!(self.peek_kind(), TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if allow_newlines {
+            self.skip_newlines();
+        }
+        let close_span = self.expect_token(&TokenKind::RBracket, "']'")?;
+        Ok((entries, open_span.merge(close_span)))
+    }
+
+    fn parse_single_feature(&mut self) -> Result<FeatureEntry, DslError> {
+        let tok = self.peek().clone();
+        match tok.kind {
+            TokenKind::Plus => {
+                self.advance();
+                let (name, name_span) = self.expect_ident("feature name")?;
+                let span = tok.span.merge(name_span);
+                if let Some(field) = parse_bool_field(&name) {
+                    return Ok(FeatureEntry::new(field, FeatureValue::Bool(true), span));
+                }
+                if let Some(variant) = parse_enum_variant(&name) {
+                    return Ok(FeatureEntry::new(
+                        variant.field(),
+                        variant.into_value(),
+                        span,
+                    ));
+                }
+                Err(DslError::new(DslErrorKind::UnknownFeature(name), name_span))
+            }
+            TokenKind::Minus => {
+                self.advance();
+                let (name, name_span) = self.expect_ident("feature name")?;
+                let span = tok.span.merge(name_span);
+                if let Some(field) = parse_bool_field(&name) {
+                    return Ok(FeatureEntry::new(field, FeatureValue::Bool(false), span));
+                }
+                match name.as_str() {
+                    "place" => Ok(FeatureEntry::new(
+                        FeatureField::Place,
+                        FeatureValue::Place(None),
+                        span,
+                    )),
+                    "height" => Ok(FeatureEntry::new(
+                        FeatureField::Height,
+                        FeatureValue::Height(None),
+                        span,
+                    )),
+                    "backness" => Ok(FeatureEntry::new(
+                        FeatureField::Backness,
+                        FeatureValue::Backness(None),
+                        span,
+                    )),
+                    "manner" => Err(DslError::new(
+                        DslErrorKind::InvalidFeatureValue {
+                            field: "manner".to_owned(),
+                            value: "none".to_owned(),
+                        },
+                        span,
+                    )),
+                    _ => {
+                        if let Some(variant) = parse_enum_variant(&name) {
+                            return Err(DslError::new(
+                                DslErrorKind::InvalidFeatureValue {
+                                    field: variant.field().name().to_owned(),
+                                    value: format!("-{name}"),
+                                },
+                                span,
+                            ));
+                        }
+                        Err(DslError::new(DslErrorKind::UnknownFeature(name), name_span))
+                    }
+                }
+            }
+            TokenKind::Ident(name) => {
+                self.advance();
+                if matches!(self.peek_kind(), TokenKind::Equals) {
+                    self.advance();
+                    let (val, val_span) = self.expect_ident("feature value")?;
+                    let span = tok.span.merge(val_span);
+                    return parse_assigned_feature(&name, &val, tok.span, span);
+                }
+                if let Some(variant) = parse_enum_variant(&name) {
+                    return Ok(FeatureEntry::new(
+                        variant.field(),
+                        variant.into_value(),
+                        tok.span,
+                    ));
+                }
+                if parse_bool_field(&name).is_some()
+                    || matches!(name.as_str(), "manner" | "place" | "height" | "backness")
+                {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedToken {
+                            expected: "'+'/'-' prefix or '=value'".to_owned(),
+                            found: format!("{name:?}"),
+                        },
+                        tok.span,
+                    ));
+                }
+                Err(DslError::new(DslErrorKind::UnknownFeature(name), tok.span))
+            }
+            TokenKind::Eof => Err(DslError::new(
+                DslErrorKind::UnexpectedEof {
+                    expected: "feature specification".to_owned(),
+                },
+                tok.span,
+            )),
+            other => Err(DslError::new(
+                DslErrorKind::UnexpectedToken {
+                    expected: "feature specification".to_owned(),
+                    found: other.to_string(),
+                },
+                tok.span,
+            )),
+        }
+    }
+}
+
+fn parse_assigned_feature(
+    field_name: &str,
+    value_name: &str,
+    field_span: Span,
+    full_span: Span,
+) -> Result<FeatureEntry, DslError> {
+    match field_name {
+        "manner" => match parse_manner(value_name) {
+            Some(m) => Ok(FeatureEntry::new(
+                FeatureField::Manner,
+                FeatureValue::Manner(m),
+                full_span,
+            )),
+            None => Err(DslError::new(
+                DslErrorKind::InvalidFeatureValue {
+                    field: "manner".to_owned(),
+                    value: value_name.to_owned(),
+                },
+                full_span,
+            )),
+        },
+        "place" => {
+            if value_name == "none" {
+                Ok(FeatureEntry::new(
+                    FeatureField::Place,
+                    FeatureValue::Place(None),
+                    full_span,
+                ))
+            } else if let Some(p) = parse_place(value_name) {
+                Ok(FeatureEntry::new(
+                    FeatureField::Place,
+                    FeatureValue::Place(Some(p)),
+                    full_span,
+                ))
+            } else {
+                Err(DslError::new(
+                    DslErrorKind::InvalidFeatureValue {
+                        field: "place".to_owned(),
+                        value: value_name.to_owned(),
+                    },
+                    full_span,
+                ))
+            }
+        }
+        "height" => {
+            if value_name == "none" {
+                Ok(FeatureEntry::new(
+                    FeatureField::Height,
+                    FeatureValue::Height(None),
+                    full_span,
+                ))
+            } else if let Some(h) = parse_height(value_name) {
+                Ok(FeatureEntry::new(
+                    FeatureField::Height,
+                    FeatureValue::Height(Some(h)),
+                    full_span,
+                ))
+            } else {
+                Err(DslError::new(
+                    DslErrorKind::InvalidFeatureValue {
+                        field: "height".to_owned(),
+                        value: value_name.to_owned(),
+                    },
+                    full_span,
+                ))
+            }
+        }
+        "backness" => {
+            if value_name == "none" {
+                Ok(FeatureEntry::new(
+                    FeatureField::Backness,
+                    FeatureValue::Backness(None),
+                    full_span,
+                ))
+            } else if let Some(b) = parse_backness(value_name) {
+                Ok(FeatureEntry::new(
+                    FeatureField::Backness,
+                    FeatureValue::Backness(Some(b)),
+                    full_span,
+                ))
+            } else {
+                Err(DslError::new(
+                    DslErrorKind::InvalidFeatureValue {
+                        field: "backness".to_owned(),
+                        value: value_name.to_owned(),
+                    },
+                    full_span,
+                ))
+            }
+        }
+        other => {
+            if let Some(field) = parse_bool_field(other) {
+                return match value_name {
+                    "true" => Ok(FeatureEntry::new(
+                        field,
+                        FeatureValue::Bool(true),
+                        full_span,
+                    )),
+                    "false" => Ok(FeatureEntry::new(
+                        field,
+                        FeatureValue::Bool(false),
+                        full_span,
+                    )),
+                    _ => Err(DslError::new(
+                        DslErrorKind::InvalidFeatureValue {
+                            field: other.to_owned(),
+                            value: value_name.to_owned(),
+                        },
+                        full_span,
+                    )),
+                };
+            }
+            Err(DslError::new(
+                DslErrorKind::UnknownFeature(other.to_owned()),
+                field_span,
+            ))
+        }
+    }
+}
+
+const EOF_TOKEN: Token = Token {
+    kind: TokenKind::Eof,
+    span: Span::new(0, 0, 1, 1),
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::{RuleError, derive};
+    use crate::phonology::{InventoryError, Stress};
+
+    #[test]
+    fn parses_segments_classes_and_n_to_m_rules() -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            // Inventory declarations (multiline + assigned + short forms)
+            segment p = [stop, bilabial, -voiced]
+            segment b = [manner=stop, +bilabial, +voiced]
+            segment t = [stop, alveolar, -voiced]
+            segment d = [stop, alveolar, +voiced]
+            segment r = [rhotic, alveolar, +voiced]
+            segment s = [fricative, alveolar, -voiced]
+            segment a = [
+                vowel,
+                height=low,
+                backness=central,
+            ]
+            segment aː = [vowel, low, central, +long]
+            segment e = [vowel, mid-high, front]
+            segment i = [vowel, high, front]
+            segment m = [nasal, bilabial, +voiced]
+
+            class V = {
+                a, aː, e, i,
+            }
+            class C = { p, b, t, d, r, s, m }
+
+            rule R1 "Final -m deletion":
+              m > ∅ / _ #
+
+            rule R2 "Intervocalic voicing" (simultaneous):
+              [-voiced, +stop] > [+voiced] / V _ V
+
+            rule R3 "Metathesis" (left-to-right):
+              r t > $2 $1
+
+            rule R4 "Compensatory lengthening":
+              V s > $1[+long] / _ C
+
+            rule R5 "Prothesis":
+              0 > e / # _ s
+
+            rule R6 "Glide formation and lowering":
+              i > $1[manner=approximant, +palatalized, height=none, -backness, -syllabic]
+
+            rule R7 "Long non-local context":
+              a > e / V* _ #
+        "#;
+
+        let program = parse_program(dsl)?;
+        program.validate_against(&program.inventory)?;
+
+        assert_eq!(program.inventory.len(), 11);
+        assert_eq!(
+            program.inventory.get("a"),
+            Some(&FeatureBundle::vowel(Height::Low, Backness::Central, false))
+        );
+        assert_eq!(
+            program.inventory.get("p"),
+            Some(&FeatureBundle::consonant(
+                Manner::Stop,
+                Place::Bilabial,
+                false
+            ))
+        );
+        assert_eq!(program.classes.len(), 2);
+        assert_eq!(program.rules.len(), 7);
+
+        assert_eq!(program.rules[0].name(), "Final -m deletion");
+        assert!(program.rules[0].replacement().is_empty());
+        assert_eq!(program.rules[2].mode(), ApplicationMode::LeftToRight);
+        assert_eq!(
+            program.rules[2].replacement(),
+            &[
+                ReplacementItem::Mutate {
+                    source_index: 1,
+                    mutation: FeatureMutation::new(),
+                },
+                ReplacementItem::Mutate {
+                    source_index: 0,
+                    mutation: FeatureMutation::new(),
+                },
+            ]
+        );
+        assert_eq!(
+            program.rules[3].replacement(),
+            &[ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: FeatureMutation::new().set_long(true),
+            }]
+        );
+        assert!(program.rules[4].target().is_empty());
+        assert_eq!(
+            program.rules[6].left_context(),
+            &[ContextElement::ZeroOrMore(Pattern::Class(
+                program.classes["V"].clone()
+            ))]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn separates_space_delimited_source_ref_and_feature_mutation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            segment i = [vowel, high, front]
+            segment a = [vowel, low, central]
+            rule split:
+              i > $1 [+low]
+        "#;
+        let err = parse_program(dsl);
+        // Because `i` has target_len == 1, `$1` followed by space and `[+low]` parses as TWO items!
+        let program = err?;
+        assert_eq!(program.rules[0].replacement().len(), 2);
+
+        let ambiguous = parse_program("rule bad:\n  a i > $1 [+low]\n");
+        assert!(matches!(
+            ambiguous,
+            Err(DslError {
+                kind: DslErrorKind::AmbiguousImplicitMutation { target_len: 2 },
+                ..
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_stress_on_bare_source_ref_and_executes_rule()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            segment a = [vowel, low, central]
+            segment aː = [vowel, low, central, +long]
+            segment s = [fricative, alveolar, -voiced]
+            segment t = [stop, alveolar, -voiced]
+            class V = { a, aː }
+            rule lengthen:
+              V s > $1[+long] / _ t
+        "#;
+        let program = parse_program(dsl)?;
+        let word = crate::phonology::Word::new(vec![
+            program.inventory.segment("a", Stress::Primary)?,
+            program.inventory.segment("s", Stress::Unstressed)?,
+            program.inventory.segment("t", Stress::Unstressed)?,
+        ]);
+        let trace = derive(&word, &program.rules, &program.inventory)?;
+        assert_eq!(trace.final_word().to_spaced(), "aː t");
+        assert_eq!(trace.final_word().segments()[0].stress, Stress::Primary);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_semantic_and_syntax_errors_with_exact_kinds() {
+        assert!(matches!(
+            parse_program("segment p = [+voiced]"),
+            Err(DslError {
+                kind: DslErrorKind::MissingManner { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("segment p = [stop, -manner]"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidFeatureValue { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("segment p = [stop, -stop]"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidFeatureValue { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("segment p = [stop, +voiced, -voiced]"),
+            Err(DslError {
+                kind: DslErrorKind::DuplicateFeature(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("segment p = [stop, bilabial]\nsegment b = [stop, bilabial]"),
+            Err(DslError {
+                kind: DslErrorKind::InventoryError(InventoryError::DuplicateBundle { .. }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("class V = {}"),
+            Err(DslError {
+                kind: DslErrorKind::EmptyClass(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("class V = { a }\nclass V = { e }"),
+            Err(DslError {
+                kind: DslErrorKind::DuplicateClass(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("class V = { a, a }"),
+            Err(DslError {
+                kind: DslErrorKind::DuplicateClassMember { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("class V = { a }\nrule r1:\n  a > V"),
+            Err(DslError {
+                kind: DslErrorKind::ClassInReplacement(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r1:\n  ∅ a > b"),
+            Err(DslError {
+                kind: DslErrorKind::EmptyMixedWithItems,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r1:\n  a > $0"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidSourceIndex {
+                    reference: 0,
+                    target_len: 1
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r1:\n  a > $2"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidSourceIndex {
+                    reference: 2,
+                    target_len: 1
+                },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r1 (bogus):\n  a > e"),
+            Err(DslError {
+                kind: DslErrorKind::UnknownApplicationMode(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r1:\n  a > e / V"),
+            Err(DslError {
+                kind: DslErrorKind::MissingContextFocus,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r1:\n  a > e / _ V _"),
+            Err(DslError {
+                kind: DslErrorKind::DuplicateContextFocus,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r1:\n  a > e\nrule r1:\n  e > i"),
+            Err(DslError {
+                kind: DslErrorKind::DuplicateRuleId(_),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r1:\n  ∅ > e"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidRule(RuleError::UnconstrainedInsertion { .. }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validate_against_reports_unknown_symbols_with_span() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let program = parse_program("class V = { a, x }\nrule r1:\n  a > o")?;
+        let mut inv = Inventory::new();
+        inv.insert(
+            "a",
+            FeatureBundle::vowel(Height::Low, Backness::Central, false),
+        )?;
+        inv.insert(
+            "o",
+            FeatureBundle::vowel(Height::MidHigh, Backness::Back, true),
+        )?;
+
+        let err = program.validate_against(&inv);
+        assert!(matches!(
+            err,
+            Err(DslError {
+                kind: DslErrorKind::UnknownSymbol(sym),
+                span: Span { line: 1, .. }
+            }) if sym == "x"
+        ));
+        Ok(())
+    }
+}

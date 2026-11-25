@@ -109,7 +109,7 @@ Adicionalmente, `Program::validate_against(&self, inventory: &Inventory) -> Resu
 - Entrada en UTF-8 NFC.
 - Comentarios de línea con `//` hasta el final de la línea (no usar `#`, que representa `ContextElement::WordBoundary`).
 - Palabras reservadas de inicio de declaración: `segment`, `class`, `rule`.
-- Símbolos fonológicos e identificadores sin comillas: secuencias Unicode sin espacios que no contengan operadores ni delimitadores del DSL (`{ } [ ] ( ) , : = > / _ # * + - $ " ;`). Se permite `-` interno en identificadores/rasgos compuestos (`mid-high`, `mid-low`, `left-to-right`, `right-to-left`), mientras que un `-` inicial siempre se tokeniza como signo negativo.
+- Símbolos fonológicos e identificadores sin comillas: secuencias Unicode sin espacios que no contengan operadores ni delimitadores del DSL (`{ } [ ] ( ) , : = > / _ # * + - $ " ;`). Se permiten `-` y `_` internos en identificadores/rasgos compuestos (`mid-high`, `mid-low`, `left-to-right`, `right-to-left`, `final_m_loss`), mientras que un `-` inicial siempre se tokeniza como signo negativo y un `_` inicial o aislado siempre se tokeniza como marcador de foco del contexto (`_`).
 - Literales entre comillas dobles `"..."` para nombres legibles de reglas, con soporte de escapes `\"` y `\\`.
 
 ### Declaración de inventario (`segment`)

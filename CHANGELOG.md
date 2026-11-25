@@ -14,6 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Milestone 2 DSL and maximal-munch tokenizer (`src/dsl/`): `Span`, `DslError`, `DslErrorKind`, `TokenizeError`, `TokenizeErrorKind`, Unicode-aware `lex`, manual recursive-descent `parse_program` (`segment`, `class`, `rule` with 1-based `$k` references), `Program::validate_against`, and `tokenize_word` supporting IPA stress markers (`ˈ` / `ˌ`), re-exported in `src/lib.rs` with unit tests and `tests/dsl_mvp.rs`.
 - Milestone 1 phonological model (`src/phonology/`): `Manner`, `Place`, `Height`, `Backness`, `Stress`, `FeatureBundle`, `FieldMatch`, `FieldUpdate`, `FeaturePattern`, `FeatureMutation`, `Segment`, `Word`, and bijective `Inventory` backed by `BTreeMap` with `InventoryError`.
 - Milestone 1 rule engine (`src/engine/`): `Rule` validation (`RuleError::EmptyId`, `RuleError::UnconstrainedInsertion`, `RuleError::InvalidSourceIndex`), `Pattern` (literal, feature pattern, `NaturalClass`), `ReplacementItem`, `ContextElement`, `ApplicationMode::Simultaneous`, `apply_rule`, `derive`, `DerivationTrace` omitting vacuous steps, and `EngineError`.
 - Public crate API in `src/lib.rs`, unit tests across all public modules, and `tests/golden_mvp.rs` validating `tests/fixtures/golden_mvp.tsv`.
