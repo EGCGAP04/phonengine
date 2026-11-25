@@ -1,8 +1,13 @@
 //! PhonEngine: deterministic phonological evolution and comparative reconstruction engine.
 
+pub mod dsl;
 pub mod engine;
 pub mod phonology;
 
+pub use dsl::{
+    DslError, DslErrorKind, Program, Span, TokenizeError, TokenizeErrorKind, parse_program,
+    tokenize_word,
+};
 pub use engine::{
     ApplicationMode, ContextElement, DerivationStep, DerivationTrace, EngineError, NaturalClass,
     Pattern, ReplacementItem, Rule, RuleError, apply_rule, derive,
