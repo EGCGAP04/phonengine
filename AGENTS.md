@@ -2,8 +2,8 @@
 
 ## Reglas de oro
 - Leé `SPEC.md` completo antes de crear módulos o proponer cambios de arquitectura.
-- Trabajá estrictamente dentro del hito activo (**Hito 2**: `src/dsl/` y tokenizador *maximal munch*). El Hito 1 está cerrado; no implementes bifurcación de dialectos, modos direccionales ni ejecución de contextos no locales (Hito 3), ni `src/cli/` (Hito 4) mientras el Hito 2 no esté cerrado.
-- Cero dependencias externas en `Cargo.toml` durante los Hitos 1 y 2.
+- Trabajá estrictamente dentro del hito activo (**Hito 3**: modos direccionales, contextos no locales y `DialectTree` en `src/engine/`, más bloques `stage` en `src/dsl/`). Los Hitos 1 y 2 están cerrados; no implementes `src/cli/` ni `clap` (Hito 4) mientras el Hito 3 no esté cerrado.
+- Cero dependencias externas en `Cargo.toml` durante los Hitos 1, 2 y 3 (`std`-only en `phonology`, `engine` y `dsl`; `clap` llega en el Hito 4).
 - Determinismo estricto: usá `BTreeMap` / `BTreeSet` / `Vec`; nunca `HashMap` / `HashSet`.
 - Respetá los lints de `Cargo.toml`: prohibido `unsafe`, `.unwrap()`, `.expect()` y `panic!()` en `src/`. Propagá errores mediante `Result` y enums propios que implementen `Display` y `Error`.
 - **Todo cambio de especificación va primero a `SPEC.md`** y después al código.
@@ -31,7 +31,7 @@
 - **Issues, etiquetas, milestones y proyecto**:
   - Formularios en `.github/ISSUE_TEMPLATE/` (`feature`, `bug`, `chore`, `docs`, `refactor`; issues en blanco deshabilitados). Al usar `gh issue create --body-file`, replicá las secciones del formulario. Al crear o cerrar una milestone, actualizá el desplegable de milestone en los cinco formularios.
   - Cada Issue y PR va asignado a `EGCGAP04` (`--assignee @me`), con etiquetas de tipo (`feature`, `bug`, `chore`, `documentation`, `refactor`, `blocked`) y área (`phonology`, `engine`, `dsl`, `cli`), milestone activa y en el proyecto [#8 `phonengine`](https://github.com/users/EGCGAP04/projects/8) (`In Progress` al arrancar, `Done` al cerrar/mergear).
-  - Milestones abiertas: `M2: DSL parser and maximal munch`, `M3: Dialect trees and directional rules`, `M4: CLI and export formats`. Las cierra Enzo (o el agente cuando Enzo lo pida).
+  - Milestones abiertas: `M3: Dialect trees and directional rules`, `M4: CLI and export formats`. Las cierra Enzo (o el agente cuando Enzo lo pida).
 - **Merge**: solo cuando Enzo lo pide para ese PR. Verificá antes que esté `MERGEABLE` y que pasen los checks, luego ejecutá `gh pr merge <N> --squash --match-head-commit <SHA completo>`.
 
 ## Convenciones de Rust e idioma
@@ -39,7 +39,7 @@
 - Código idiomático, tipos explícitos y enums en lugar de strings mágicos para rasgos fonéticos.
 - Toda función de aplicación de reglas debe ser pura (sin I/O ni estado global mutable).
 - `src/lib.rs` debe exponer una API pública limpia; `tests/` debe consumir el crate como cliente externo.
-- Cada módulo público debe incluir tests unitarios (`#[cfg(test)]`) cubriendo tanto casos válidos como errores esperados (`InventoryError`, `RuleError`, `EngineError`, `DslError`, `TokenizeError`).
+- Cada módulo público debe incluir tests unitarios (`#[cfg(test)]`) cubriendo tanto casos válidos como errores esperados (`InventoryError`, `RuleError`, `EngineError`, `DialectError`, `DslError`, `TokenizeError`).
 
 ## Verificación obligatoria antes de cerrar cualquier tarea
 Ejecutá siempre este comando único y no des la tarea por terminada si falla algún paso:
