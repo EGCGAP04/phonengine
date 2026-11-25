@@ -13,6 +13,8 @@ pub(crate) enum TokenKind {
     Class,
     /// Reserved keyword `rule`.
     Rule,
+    /// Reserved keyword `stage`.
+    Stage,
     /// Unquoted identifier or phonological symbol.
     Ident(String),
     /// Double-quoted string literal.
@@ -65,6 +67,7 @@ impl fmt::Display for TokenKind {
             Self::Segment => f.write_str("keyword 'segment'"),
             Self::Class => f.write_str("keyword 'class'"),
             Self::Rule => f.write_str("keyword 'rule'"),
+            Self::Stage => f.write_str("keyword 'stage'"),
             Self::Ident(ident) => write!(f, "{ident:?}"),
             Self::StringLit(text) => write!(f, "string {text:?}"),
             Self::SourceRef(idx) => write!(f, "'${idx}'"),
@@ -276,6 +279,7 @@ impl<'a> Scanner<'a> {
             "segment" => TokenKind::Segment,
             "class" => TokenKind::Class,
             "rule" => TokenKind::Rule,
+            "stage" => TokenKind::Stage,
             "0" => TokenKind::Empty,
             _ => TokenKind::Ident(text),
         };
@@ -494,11 +498,15 @@ mod tests {
 
     #[test]
     fn lexes_snake_case_identifiers_and_standalone_context_underscore() -> Result<(), DslError> {
-        let tokens = lex("final_m_loss non_local _ # _# V _ V")?;
+        let tokens = lex("stage pie from root final_m_loss non_local _ # _# V _ V")?;
         let kinds: Vec<TokenKind> = tokens.into_iter().map(|t| t.kind).collect();
         assert_eq!(
             kinds,
             vec![
+                TokenKind::Stage,
+                TokenKind::Ident("pie".to_owned()),
+                TokenKind::Ident("from".to_owned()),
+                TokenKind::Ident("root".to_owned()),
                 TokenKind::Ident("final_m_loss".to_owned()),
                 TokenKind::Ident("non_local".to_owned()),
                 TokenKind::Underscore,

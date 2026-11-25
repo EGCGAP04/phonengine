@@ -9,8 +9,9 @@ pub use dsl::{
     tokenize_word,
 };
 pub use engine::{
-    ApplicationMode, ContextElement, DerivationStep, DerivationTrace, EngineError, NaturalClass,
-    Pattern, ReplacementItem, Rule, RuleError, apply_rule, derive,
+    ApplicationMode, ContextElement, DerivationStep, DerivationTrace, DialectError, DialectNode,
+    DialectTrace, DialectTree, EngineError, NaturalClass, Pattern, ReplacementItem, Rule,
+    RuleError, StageTrace, TreeDerivation, apply_rule, derive,
 };
 pub use phonology::{
     Backness, FeatureBundle, FeatureMutation, FeaturePattern, FieldMatch, FieldUpdate, Height,

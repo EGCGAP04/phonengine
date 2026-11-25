@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::engine::RuleError;
+use crate::engine::{DialectError, RuleError};
 use crate::phonology::InventoryError;
 
 /// Source span tracking byte offsets and 1-based Unicode scalar line/column coordinates.
@@ -127,8 +127,12 @@ pub enum DslErrorKind {
     MissingContextFocus,
     /// Included more than one `_` focus marker in a rule's context.
     DuplicateContextFocus,
-    /// Declared a rule identifier more than once in the same program.
+    /// Declared a rule identifier more than once in the same scope.
     DuplicateRuleId(String),
+    /// Mixed top-level `rule` declarations and `stage` blocks in the same program.
+    MixedTopLevelRulesAndStages,
+    /// Dialect tree construction failed structural validation invariants.
+    InvalidDialectTree(DialectError),
     /// Rule construction failed engine validation invariants.
     InvalidRule(RuleError),
     /// Symbol referenced by a rule or class does not exist in the validated inventory.
@@ -194,6 +198,10 @@ impl fmt::Display for DslErrorKind {
                 f.write_str("context after '/' must contain only one '_' focus placeholder")
             }
             Self::DuplicateRuleId(id) => write!(f, "duplicate rule id {id:?}"),
+            Self::MixedTopLevelRulesAndStages => f.write_str(
+                "cannot mix top-level 'rule' declarations and 'stage' blocks in the same program",
+            ),
+            Self::InvalidDialectTree(err) => write!(f, "{err}"),
             Self::InvalidRule(err) => write!(f, "{err}"),
             Self::UnknownSymbol(sym) => {
                 write!(f, "symbol {sym:?} is not registered in inventory")
@@ -229,6 +237,7 @@ impl Error for DslError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.kind {
             DslErrorKind::InventoryError(err) => Some(err),
+            DslErrorKind::InvalidDialectTree(err) => Some(err),
             DslErrorKind::InvalidRule(err) => Some(err),
             _ => None,
         }
@@ -325,6 +334,16 @@ mod tests {
 
         let rule_err = DslError::new(DslErrorKind::InvalidRule(RuleError::EmptyId), span);
         assert!(rule_err.source().is_some());
+
+        let dialect_err = DslError::new(
+            DslErrorKind::InvalidDialectTree(DialectError::MissingRoot),
+            span,
+        );
+        assert!(dialect_err.source().is_some());
+
+        let mixed_err = DslError::new(DslErrorKind::MixedTopLevelRulesAndStages, span);
+        assert!(!mixed_err.to_string().is_empty());
+        assert!(mixed_err.source().is_none());
 
         let plain_err = DslError::new(DslErrorKind::MissingContextFocus, span);
         assert!(!plain_err.to_string().is_empty());
