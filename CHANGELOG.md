@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Defined Milestone 3 specification in `SPEC.md`: $O(|word| \cdot |context|)$ reachability matching for `ZeroOrMore`, single-pass `LeftToRight` / `RightToLeft` directional modes, `DialectTree` / `DialectError` / `TreeDerivation`, removal of transitional `UnsupportedMode` / `UnsupportedContext` errors in favor of `UnknownStage`, and `stage` DSL syntax (`Program::dialect_tree`).
+- Updated `AGENTS.md` to mark Milestone 3 as active (`std`-only through M3) and removed closed `M2` from `.github/ISSUE_TEMPLATE/*.yml`.
 - Specified the complete Milestone 2 DSL (`segment`, `class`, `rule` with 1-based `$k` references), `Span`-based diagnostics (`DslError`), and maximal-munch word tokenizer (`tokenize_word` with IPA stress markers `ˈ`/`ˌ`) in `SPEC.md`.
 - Updated `AGENTS.md` to mark Milestone 2 as active and document the repository's Git/GitHub workflow (protected `main`, SSH-signed commits, squash merge, templates, labels, milestones, and project #8).
 - Removed closed `M0` and `M1` milestone options from `.github/ISSUE_TEMPLATE/*.yml`.
