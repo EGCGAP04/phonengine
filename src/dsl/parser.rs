@@ -3,7 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::engine::{
-    ApplicationMode, ContextElement, NaturalClass, Pattern, ReplacementItem, Rule,
+    ApplicationMode, ContextElement, DialectError, DialectNode, DialectTree, NaturalClass, Pattern,
+    ReplacementItem, Rule,
 };
 use crate::phonology::{
     Backness, FeatureBundle, FeatureMutation, FeaturePattern, FieldMatch, FieldUpdate, Height,
@@ -13,15 +14,18 @@ use crate::phonology::{
 use super::error::{DslError, DslErrorKind, Span};
 use super::lexer::{Token, TokenKind, lex};
 
-/// Complete parsed DSL program containing an optional inventory, natural classes, and rules.
+/// Complete parsed DSL program containing an optional inventory, natural classes, rules,
+/// and an optional dialect tree.
 #[derive(Debug, Clone, Default)]
 pub struct Program {
     /// Segment inventory populated from `segment` declarations (empty if none are present).
     pub inventory: Inventory,
     /// Declared natural classes keyed deterministically by name.
     pub classes: BTreeMap<String, NaturalClass>,
-    /// Ordered phonological rules validated by [`Rule::new`].
+    /// Ordered top-level phonological rules (empty when `stage` blocks are declared).
     pub rules: Vec<Rule>,
+    /// Rooted chronological dialect tree populated from `stage` blocks, if present.
+    pub dialect_tree: Option<DialectTree>,
     symbol_refs: Vec<(String, Span)>,
 }
 
@@ -30,6 +34,7 @@ impl PartialEq for Program {
         self.inventory == other.inventory
             && self.classes == other.classes
             && self.rules == other.rules
+            && self.dialect_tree == other.dialect_tree
     }
 }
 
@@ -234,6 +239,7 @@ struct Parser {
     classes: BTreeMap<String, NaturalClass>,
     rules: Vec<Rule>,
     rule_ids: BTreeSet<String>,
+    stages: Vec<(DialectNode, Span, Span)>,
     symbol_refs: Vec<(String, Span)>,
 }
 
@@ -246,6 +252,7 @@ impl Parser {
             classes: BTreeMap::new(),
             rules: Vec::new(),
             rule_ids: BTreeSet::new(),
+            stages: Vec::new(),
             symbol_refs: Vec::new(),
         }
     }
@@ -293,6 +300,13 @@ impl Parser {
                 self.peek().span,
             )),
         }
+    }
+
+    fn expect_rule_end(&mut self, allow_rbrace_end: bool) -> Result<(), DslError> {
+        if allow_rbrace_end && matches!(self.peek_kind(), TokenKind::RBrace) {
+            return Ok(());
+        }
+        self.expect_line_end()
     }
 
     fn expect_ident(&mut self, expected: &str) -> Result<(String, Span), DslError> {
@@ -352,11 +366,32 @@ impl Parser {
                 TokenKind::Eof => break,
                 TokenKind::Segment => self.parse_segment_decl()?,
                 TokenKind::Class => self.parse_class_decl()?,
-                TokenKind::Rule => self.parse_rule_decl()?,
+                TokenKind::Rule => {
+                    if !self.stages.is_empty() {
+                        return Err(DslError::new(
+                            DslErrorKind::MixedTopLevelRulesAndStages,
+                            self.peek().span,
+                        ));
+                    }
+                    let mut ids = std::mem::take(&mut self.rule_ids);
+                    let rule_res = self.parse_rule_decl(&mut ids, false);
+                    self.rule_ids = ids;
+                    self.rules.push(rule_res?);
+                }
+                TokenKind::Stage => {
+                    if !self.rules.is_empty() {
+                        return Err(DslError::new(
+                            DslErrorKind::MixedTopLevelRulesAndStages,
+                            self.peek().span,
+                        ));
+                    }
+                    self.parse_stage_decl()?;
+                }
                 other => {
                     return Err(DslError::new(
                         DslErrorKind::UnexpectedToken {
-                            expected: "'segment', 'class', or 'rule' declaration".to_owned(),
+                            expected: "'segment', 'class', 'rule', or 'stage' declaration"
+                                .to_owned(),
                             found: other.to_string(),
                         },
                         self.peek().span,
@@ -365,12 +400,102 @@ impl Parser {
             }
         }
 
+        let dialect_tree = if self.stages.is_empty() {
+            None
+        } else {
+            let stages = std::mem::take(&mut self.stages);
+            let mut nodes = Vec::with_capacity(stages.len());
+            let mut stage_spans = BTreeMap::new();
+            let mut combined_span: Option<Span> = None;
+
+            for (node, header_span, full_span) in stages {
+                stage_spans
+                    .entry(node.id().to_owned())
+                    .or_insert(header_span);
+                combined_span = Some(match combined_span {
+                    Some(prev) => prev.merge(full_span),
+                    None => full_span,
+                });
+                nodes.push(node);
+            }
+
+            let fallback_span = combined_span.unwrap_or(EOF_TOKEN.span);
+            let tree = DialectTree::new(nodes).map_err(|err| {
+                let span = dialect_error_span(&err, &stage_spans, fallback_span);
+                DslError::new(DslErrorKind::InvalidDialectTree(err), span)
+            })?;
+            Some(tree)
+        };
+
         Ok(Program {
             inventory: std::mem::take(&mut self.inventory),
             classes: std::mem::take(&mut self.classes),
             rules: std::mem::take(&mut self.rules),
+            dialect_tree,
             symbol_refs: std::mem::take(&mut self.symbol_refs),
         })
+    }
+
+    fn parse_stage_decl(&mut self) -> Result<(), DslError> {
+        let kw_span = self.advance().span;
+        let (id, id_span) = self.expect_ident("stage identifier")?;
+        let header_span = kw_span.merge(id_span);
+
+        let name = if let TokenKind::StringLit(label) = self.peek_kind().clone() {
+            self.advance();
+            label
+        } else {
+            id.clone()
+        };
+
+        let parent = if matches!(self.peek_kind(), TokenKind::Ident(kw) if kw == "from") {
+            self.advance();
+            let (parent_id, _) = self.expect_ident("parent stage identifier")?;
+            Some(parent_id)
+        } else {
+            None
+        };
+
+        self.expect_token(&TokenKind::LBrace, "'{'")?;
+        let mut stage_rules = Vec::new();
+        let mut stage_rule_ids = BTreeSet::new();
+
+        loop {
+            self.skip_newlines();
+            match self.peek_kind() {
+                TokenKind::RBrace => break,
+                TokenKind::Rule => {
+                    stage_rules.push(self.parse_rule_decl(&mut stage_rule_ids, true)?);
+                }
+                TokenKind::Eof => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedEof {
+                            expected: "'rule' declaration or '}'".to_owned(),
+                        },
+                        self.peek().span,
+                    ));
+                }
+                other => {
+                    return Err(DslError::new(
+                        DslErrorKind::UnexpectedToken {
+                            expected: "'rule' declaration or '}'".to_owned(),
+                            found: other.to_string(),
+                        },
+                        self.peek().span,
+                    ));
+                }
+            }
+        }
+
+        let close_span = self.expect_token(&TokenKind::RBrace, "'}'")?;
+        self.expect_line_end()?;
+
+        self.stages.push((
+            DialectNode::new(id, name, parent, stage_rules),
+            header_span,
+            kw_span.merge(close_span),
+        ));
+        Ok(())
     }
 
     fn parse_segment_decl(&mut self) -> Result<(), DslError> {
@@ -490,10 +615,14 @@ impl Parser {
         Ok(())
     }
 
-    fn parse_rule_decl(&mut self) -> Result<(), DslError> {
+    fn parse_rule_decl(
+        &mut self,
+        seen_rule_ids: &mut BTreeSet<String>,
+        allow_rbrace_end: bool,
+    ) -> Result<Rule, DslError> {
         let kw_span = self.advance().span;
         let (id, id_span) = self.expect_ident("rule identifier")?;
-        if !self.rule_ids.insert(id.clone()) {
+        if !seen_rule_ids.insert(id.clone()) {
             return Err(DslError::new(DslErrorKind::DuplicateRuleId(id), id_span));
         }
 
@@ -528,19 +657,20 @@ impl Parser {
 
         let (target, target_span) = self.parse_rule_target()?;
         self.expect_token(&TokenKind::Gt, "'>'")?;
-        let (replacement, repl_span) = self.parse_rule_replacement(target.len())?;
+        let (replacement, repl_span) =
+            self.parse_rule_replacement(target.len(), allow_rbrace_end)?;
 
         let (left_context, right_context, end_span) =
             if matches!(self.peek_kind(), TokenKind::Slash) {
-                self.parse_rule_context()?
+                self.parse_rule_context(allow_rbrace_end)?
             } else {
                 (Vec::new(), Vec::new(), repl_span)
             };
 
-        self.expect_line_end()?;
+        self.expect_rule_end(allow_rbrace_end)?;
 
         let rule_span = kw_span.merge(target_span).merge(end_span);
-        let rule = Rule::new(
+        Rule::new(
             id,
             name,
             target,
@@ -549,9 +679,7 @@ impl Parser {
             right_context,
             mode,
         )
-        .map_err(|err| DslError::new(DslErrorKind::InvalidRule(err), rule_span))?;
-        self.rules.push(rule);
-        Ok(())
+        .map_err(|err| DslError::new(DslErrorKind::InvalidRule(err), rule_span))
     }
 
     fn parse_rule_target(&mut self) -> Result<(Vec<Pattern>, Span), DslError> {
@@ -628,6 +756,7 @@ impl Parser {
     fn parse_rule_replacement(
         &mut self,
         target_len: usize,
+        allow_rbrace_end: bool,
     ) -> Result<(Vec<ReplacementItem>, Span), DslError> {
         let mut items = Vec::new();
         let mut saw_empty = false;
@@ -636,7 +765,8 @@ impl Parser {
         while !matches!(
             self.peek_kind(),
             TokenKind::Slash | TokenKind::Newline | TokenKind::Eof
-        ) {
+        ) && !(allow_rbrace_end && matches!(self.peek_kind(), TokenKind::RBrace))
+        {
             let tok = self.peek().clone();
             match tok.kind {
                 TokenKind::Empty => {
@@ -745,6 +875,7 @@ impl Parser {
 
     fn parse_rule_context(
         &mut self,
+        allow_rbrace_end: bool,
     ) -> Result<(Vec<ContextElement>, Vec<ContextElement>, Span), DslError> {
         let slash_span = self.advance().span;
         let mut left = Vec::new();
@@ -752,7 +883,9 @@ impl Parser {
         let mut saw_focus = false;
         let mut last_span = slash_span;
 
-        while !matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Eof) {
+        while !matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Eof)
+            && !(allow_rbrace_end && matches!(self.peek_kind(), TokenKind::RBrace))
+        {
             let tok = self.peek().clone();
             match tok.kind {
                 TokenKind::Underscore => {
@@ -1198,6 +1331,32 @@ fn parse_assigned_feature(
     }
 }
 
+fn dialect_error_span(
+    err: &DialectError,
+    stage_spans: &BTreeMap<String, Span>,
+    fallback: Span,
+) -> Span {
+    match err {
+        DialectError::DuplicateStageId(id) => stage_spans.get(id).copied().unwrap_or(fallback),
+        DialectError::UnknownParent { stage_id, .. } => {
+            stage_spans.get(stage_id).copied().unwrap_or(fallback)
+        }
+        DialectError::MultipleRoots(roots) => roots
+            .first()
+            .and_then(|id| stage_spans.get(id))
+            .copied()
+            .unwrap_or(fallback),
+        DialectError::CycleDetected(cycle) => cycle
+            .first()
+            .and_then(|id| stage_spans.get(id))
+            .copied()
+            .unwrap_or(fallback),
+        DialectError::EmptyTree | DialectError::EmptyStageId | DialectError::MissingRoot => {
+            fallback
+        }
+    }
+}
+
 const EOF_TOKEN: Token = Token {
     kind: TokenKind::Eof,
     span: Span::new(0, 0, 1, 1),
@@ -1507,6 +1666,103 @@ mod tests {
                 kind: DslErrorKind::UnknownSymbol(sym),
                 span: Span { line: 1, .. }
             }) if sym == "x"
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn parses_stage_dialect_trees_and_validates_per_stage_rule_ids()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            segment a = [vowel, low, central]
+            segment e = [vowel, mid-high, front]
+            segment o = [vowel, mid-high, back, +rounded]
+            segment p = [stop, bilabial, -voiced]
+
+            stage proto "Proto-Language" {}
+
+            stage north from proto {
+              rule raise:
+                a > e
+            }
+
+            // Same rule id `raise` in sister stage is allowed.
+            stage south from proto {
+              rule raise:
+                a > o
+            }
+        "#;
+
+        let program = parse_program(dsl)?;
+        program.validate_against(&program.inventory)?;
+        assert!(program.rules.is_empty());
+        let tree = program
+            .dialect_tree
+            .as_ref()
+            .ok_or("expected dialect tree")?;
+        assert_eq!(tree.root_id(), "proto");
+        assert_eq!(tree.leaves(), vec!["north", "south"]);
+
+        // Single-line stage with rule also parses cleanly.
+        let one_line = parse_program("stage root { rule r1: a > e }")?;
+        assert!(one_line.dialect_tree.is_some());
+
+        // `validate_against` checks symbols inside stage rules too.
+        let unknown_in_stage = parse_program("stage root {\n  rule r1:\n    a > z\n}")?;
+        assert!(matches!(
+            unknown_in_stage.validate_against(&program.inventory),
+            Err(DslError {
+                kind: DslErrorKind::UnknownSymbol(sym),
+                span: Span { line: 3, .. }
+            }) if sym == "z"
+        ));
+
+        // Duplicate rule id within the same stage is rejected.
+        assert!(matches!(
+            parse_program("stage root {\n  rule r1:\n    a > e\n  rule r1:\n    e > o\n}"),
+            Err(DslError {
+                kind: DslErrorKind::DuplicateRuleId(_),
+                ..
+            })
+        ));
+
+        // Mixing top-level rules and stages in either order is rejected.
+        assert!(matches!(
+            parse_program("rule r1:\n  a > e\nstage root {}"),
+            Err(DslError {
+                kind: DslErrorKind::MixedTopLevelRulesAndStages,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("stage root {}\nrule r1:\n  a > e"),
+            Err(DslError {
+                kind: DslErrorKind::MixedTopLevelRulesAndStages,
+                ..
+            })
+        ));
+
+        // Invalid dialect tree invariants surface as `InvalidDialectTree`.
+        assert!(matches!(
+            parse_program("stage child from missing {}"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidDialectTree(DialectError::UnknownParent { .. }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("stage a {}\nstage b {}"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidDialectTree(DialectError::MultipleRoots(_)),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("stage root {}\nstage a from b {}\nstage b from a {}"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidDialectTree(DialectError::CycleDetected(_)),
+                ..
+            })
         ));
         Ok(())
     }

@@ -1,8 +1,8 @@
 //! Integration tests for Milestone 2: DSL parsing and maximal-munch tokenization.
 
 use phonengine::{
-    ApplicationMode, Backness, ContextElement, DslError, DslErrorKind, EngineError, FeatureBundle,
-    Height, Inventory, Manner, Place, Stress, apply_rule, derive, parse_program, tokenize_word,
+    ApplicationMode, Backness, ContextElement, DslError, DslErrorKind, FeatureBundle, Height,
+    Inventory, Manner, Place, Stress, apply_rule, derive, parse_program, tokenize_word,
 };
 
 const GOLDEN_MVP_TSV: &str = include_str!("fixtures/golden_mvp.tsv");
@@ -184,6 +184,7 @@ fn rules_only_dsl_validates_against_external_inventory_and_defers_m3_features()
     "#;
     let program = parse_program(rules_only)?;
     assert!(program.inventory.is_empty());
+    assert!(program.dialect_tree.is_none());
     program.validate_against(&inv)?;
 
     assert_eq!(
@@ -196,14 +197,12 @@ fn rules_only_dsl_validates_against_external_inventory_and_defers_m3_features()
 
     let word = tokenize_word("ta", &inv)?;
     assert_eq!(
-        apply_rule(&word, &program.rules[0], &inv),
-        Err(EngineError::UnsupportedContext {
-            rule_id: "non_local".to_owned(),
-        })
+        apply_rule(&word, &program.rules[0], &inv)?.to_spaced(),
+        "t e"
     );
     assert_eq!(
-        apply_rule(&word, &program.rules[1], &inv),
-        Err(EngineError::UnsupportedMode(ApplicationMode::LeftToRight))
+        apply_rule(&tokenize_word("ete", &inv)?, &program.rules[1], &inv)?.to_spaced(),
+        "a t a"
     );
 
     let invalid = parse_program("rule bad:\n  a > z\n")?;

@@ -1,4 +1,5 @@
-//! Pure rule-application engine implementing Milestone 1 `Simultaneous` mode.
+//! Pure rule-application engine supporting Simultaneous, LeftToRight, RightToLeft,
+//! and non-local `ZeroOrMore` contexts.
 
 use crate::phonology::{Inventory, Segment, Stress, Word};
 
@@ -8,51 +9,19 @@ use super::trace::{DerivationStep, DerivationTrace};
 
 /// Applies a single phonological `rule` to `word` using `inventory` without mutating inputs.
 ///
-/// In Milestone 1, only [`ApplicationMode::Simultaneous`] and local contexts
-/// ([`ContextElement::WordBoundary`] and [`ContextElement::Segment`]) are supported.
+/// Supports [`ApplicationMode::Simultaneous`], [`ApplicationMode::LeftToRight`], and
+/// [`ApplicationMode::RightToLeft`], as well as local and non-local (`ZeroOrMore`) contexts.
 ///
 /// # Errors
 ///
-/// - [`EngineError::UnsupportedMode`] if `rule.mode()` is not [`ApplicationMode::Simultaneous`].
-/// - [`EngineError::UnsupportedContext`] if either context contains [`ContextElement::ZeroOrMore`].
 /// - [`EngineError::UnknownSymbol`] if a [`ReplacementItem::Literal`] symbol is missing from `inventory`.
 /// - [`EngineError::UnmappedFeatureBundle`] if a [`ReplacementItem::Mutate`] yields a bundle absent from `inventory`.
 pub fn apply_rule(word: &Word, rule: &Rule, inventory: &Inventory) -> Result<Word, EngineError> {
-    if rule.mode() != ApplicationMode::Simultaneous {
-        return Err(EngineError::UnsupportedMode(rule.mode()));
+    match rule.mode() {
+        ApplicationMode::Simultaneous => apply_simultaneous(word, rule, inventory),
+        ApplicationMode::LeftToRight => apply_left_to_right(word, rule, inventory),
+        ApplicationMode::RightToLeft => apply_right_to_left(word, rule, inventory),
     }
-    if has_non_local_context(rule.left_context()) || has_non_local_context(rule.right_context()) {
-        return Err(EngineError::UnsupportedContext {
-            rule_id: rule.id().to_owned(),
-        });
-    }
-
-    let snapshot = word.segments();
-    let target = rule.target();
-    let mut output = Vec::with_capacity(snapshot.len());
-
-    if target.is_empty() {
-        apply_epenthesis(snapshot, rule, inventory, &mut output)?;
-        return Ok(Word::new(output));
-    }
-
-    let mut pos = 0;
-    while pos < snapshot.len() {
-        if pos + target.len() <= snapshot.len()
-            && matches_target(&snapshot[pos..pos + target.len()], target)
-            && matches_left_context(snapshot, pos, rule.left_context())
-            && matches_right_context(snapshot, pos + target.len(), rule.right_context())
-        {
-            let matched = &snapshot[pos..pos + target.len()];
-            append_replacement(&mut output, rule, matched, inventory)?;
-            pos += target.len();
-        } else {
-            output.push(snapshot[pos].clone());
-            pos += 1;
-        }
-    }
-
-    Ok(Word::new(output))
 }
 
 /// Applies an ordered sequence of `rules` to `initial`, returning an immutable [`DerivationTrace`].
@@ -86,29 +55,136 @@ pub fn derive(
     Ok(DerivationTrace::new(initial.clone(), steps, current))
 }
 
-fn has_non_local_context(context: &[ContextElement]) -> bool {
-    context
-        .iter()
-        .any(|elem| matches!(elem, ContextElement::ZeroOrMore(_)))
-}
-
-fn apply_epenthesis(
-    snapshot: &[Segment],
+fn apply_simultaneous(
+    word: &Word,
     rule: &Rule,
     inventory: &Inventory,
-    output: &mut Vec<Segment>,
-) -> Result<(), EngineError> {
-    for pos in 0..=snapshot.len() {
-        if matches_left_context(snapshot, pos, rule.left_context())
-            && matches_right_context(snapshot, pos, rule.right_context())
-        {
-            append_replacement(output, rule, &[], inventory)?;
+) -> Result<Word, EngineError> {
+    let snapshot = word.segments();
+    let target = rule.target();
+    let mut output = Vec::with_capacity(snapshot.len());
+
+    if target.is_empty() {
+        for pos in 0..=snapshot.len() {
+            if matches_left_context(snapshot, pos, rule.left_context())
+                && matches_right_context(snapshot, pos, rule.right_context())
+            {
+                append_replacement(&mut output, rule, &[], inventory)?;
+            }
+            if let Some(seg) = snapshot.get(pos) {
+                output.push(seg.clone());
+            }
         }
-        if let Some(seg) = snapshot.get(pos) {
-            output.push(seg.clone());
+        return Ok(Word::new(output));
+    }
+
+    let mut pos = 0;
+    while pos < snapshot.len() {
+        if pos + target.len() <= snapshot.len()
+            && matches_target(&snapshot[pos..pos + target.len()], target)
+            && matches_left_context(snapshot, pos, rule.left_context())
+            && matches_right_context(snapshot, pos + target.len(), rule.right_context())
+        {
+            let matched = &snapshot[pos..pos + target.len()];
+            append_replacement(&mut output, rule, matched, inventory)?;
+            pos += target.len();
+        } else {
+            output.push(snapshot[pos].clone());
+            pos += 1;
         }
     }
-    Ok(())
+
+    Ok(Word::new(output))
+}
+
+fn apply_left_to_right(
+    word: &Word,
+    rule: &Rule,
+    inventory: &Inventory,
+) -> Result<Word, EngineError> {
+    let mut current = word.segments().to_vec();
+    let target = rule.target();
+
+    if target.is_empty() {
+        let mut pos = 0;
+        loop {
+            let inserted_len = if matches_left_context(&current, pos, rule.left_context())
+                && matches_right_context(&current, pos, rule.right_context())
+            {
+                let repl = build_replacement(rule, &[], inventory)?;
+                let len = repl.len();
+                current.splice(pos..pos, repl);
+                len
+            } else {
+                0
+            };
+            if pos + inserted_len == current.len() {
+                break;
+            }
+            pos += inserted_len + 1;
+        }
+        return Ok(Word::new(current));
+    }
+
+    let mut pos = 0;
+    while pos + target.len() <= current.len() {
+        if matches_target(&current[pos..pos + target.len()], target)
+            && matches_left_context(&current, pos, rule.left_context())
+            && matches_right_context(&current, pos + target.len(), rule.right_context())
+        {
+            let repl = build_replacement(rule, &current[pos..pos + target.len()], inventory)?;
+            let repl_len = repl.len();
+            current.splice(pos..pos + target.len(), repl);
+            pos += repl_len;
+        } else {
+            pos += 1;
+        }
+    }
+
+    Ok(Word::new(current))
+}
+
+fn apply_right_to_left(
+    word: &Word,
+    rule: &Rule,
+    inventory: &Inventory,
+) -> Result<Word, EngineError> {
+    let mut current = word.segments().to_vec();
+    let target = rule.target();
+
+    if target.is_empty() {
+        let mut pos = current.len();
+        loop {
+            if matches_left_context(&current, pos, rule.left_context())
+                && matches_right_context(&current, pos, rule.right_context())
+            {
+                let repl = build_replacement(rule, &[], inventory)?;
+                current.splice(pos..pos, repl);
+            }
+            if pos == 0 {
+                break;
+            }
+            pos -= 1;
+        }
+        return Ok(Word::new(current));
+    }
+
+    let mut end = current.len();
+    while end >= target.len() {
+        let start = end - target.len();
+        if matches_target(&current[start..end], target)
+            && matches_left_context(&current, start, rule.left_context())
+            && matches_right_context(&current, end, rule.right_context())
+        {
+            let repl = build_replacement(rule, &current[start..end], inventory)?;
+            current.splice(start..end, repl);
+            end = start;
+        } else {
+            end -= 1;
+        }
+    }
+
+    Ok(Word::new(current))
 }
 
 fn matches_target(slice: &[Segment], target: &[Pattern]) -> bool {
@@ -120,65 +196,103 @@ fn matches_target(slice: &[Segment], target: &[Pattern]) -> bool {
 }
 
 fn matches_left_context(snapshot: &[Segment], start: usize, left: &[ContextElement]) -> bool {
-    let mut idx = start;
-    let mut at_boundary = false;
+    let n = snapshot.len();
+    let mut reachable = vec![false; n + 1];
+    reachable[start] = true;
+    let mut boundary_reached = false;
 
     for elem in left.iter().rev() {
-        if at_boundary {
+        if boundary_reached {
             return false;
         }
         match elem {
             ContextElement::WordBoundary => {
-                if idx != 0 {
+                if !reachable[0] {
                     return false;
                 }
-                at_boundary = true;
+                reachable.fill(false);
+                boundary_reached = true;
             }
             ContextElement::Segment(pat) => {
-                if idx == 0 {
+                let mut next = vec![false; n + 1];
+                let mut any = false;
+                for idx in 1..=n {
+                    if reachable[idx] && pat.matches(&snapshot[idx - 1]) {
+                        next[idx - 1] = true;
+                        any = true;
+                    }
+                }
+                if !any {
                     return false;
                 }
-                idx -= 1;
-                if !pat.matches(&snapshot[idx]) {
-                    return false;
+                reachable = next;
+            }
+            ContextElement::ZeroOrMore(pat) => {
+                for idx in (1..=n).rev() {
+                    if reachable[idx] && pat.matches(&snapshot[idx - 1]) {
+                        reachable[idx - 1] = true;
+                    }
                 }
             }
-            ContextElement::ZeroOrMore(_) => return false,
         }
     }
 
-    true
+    boundary_reached || reachable.iter().any(|&flag| flag)
 }
 
 fn matches_right_context(snapshot: &[Segment], end: usize, right: &[ContextElement]) -> bool {
-    let mut idx = end;
-    let mut at_boundary = false;
+    let n = snapshot.len();
+    let mut reachable = vec![false; n + 1];
+    reachable[end] = true;
+    let mut boundary_reached = false;
 
     for elem in right {
-        if at_boundary {
+        if boundary_reached {
             return false;
         }
         match elem {
             ContextElement::WordBoundary => {
-                if idx != snapshot.len() {
+                if !reachable[n] {
                     return false;
                 }
-                at_boundary = true;
+                reachable.fill(false);
+                boundary_reached = true;
             }
             ContextElement::Segment(pat) => {
-                let Some(seg) = snapshot.get(idx) else {
-                    return false;
-                };
-                if !pat.matches(seg) {
+                let mut next = vec![false; n + 1];
+                let mut any = false;
+                for idx in 0..n {
+                    if reachable[idx] && pat.matches(&snapshot[idx]) {
+                        next[idx + 1] = true;
+                        any = true;
+                    }
+                }
+                if !any {
                     return false;
                 }
-                idx += 1;
+                reachable = next;
             }
-            ContextElement::ZeroOrMore(_) => return false,
+            ContextElement::ZeroOrMore(pat) => {
+                for idx in 0..n {
+                    if reachable[idx] && pat.matches(&snapshot[idx]) {
+                        reachable[idx + 1] = true;
+                    }
+                }
+            }
         }
     }
 
-    true
+    boundary_reached || reachable.iter().any(|&flag| flag)
+}
+
+fn build_replacement(
+    rule: &Rule,
+    matched: &[Segment],
+    inventory: &Inventory,
+) -> Result<Vec<Segment>, EngineError> {
+    let mut built = Vec::with_capacity(rule.replacement().len());
+    append_replacement(&mut built, rule, matched, inventory)?;
+    Ok(built)
 }
 
 fn append_replacement(
@@ -259,6 +373,10 @@ mod tests {
             FeatureBundle::consonant(Manner::Stop, Place::Bilabial, false),
         )?;
         inv.insert(
+            "ph",
+            FeatureBundle::consonant(Manner::Stop, Place::Bilabial, false).with_aspirated(true),
+        )?;
+        inv.insert(
             "b",
             FeatureBundle::consonant(Manner::Stop, Place::Bilabial, true),
         )?;
@@ -267,8 +385,20 @@ mod tests {
             FeatureBundle::consonant(Manner::Stop, Place::Alveolar, false),
         )?;
         inv.insert(
+            "th",
+            FeatureBundle::consonant(Manner::Stop, Place::Alveolar, false).with_aspirated(true),
+        )?;
+        inv.insert(
             "d",
             FeatureBundle::consonant(Manner::Stop, Place::Alveolar, true),
+        )?;
+        inv.insert(
+            "k",
+            FeatureBundle::consonant(Manner::Stop, Place::Velar, false),
+        )?;
+        inv.insert(
+            "kh",
+            FeatureBundle::consonant(Manner::Stop, Place::Velar, false).with_aspirated(true),
         )?;
         inv.insert(
             "f",
@@ -487,6 +617,215 @@ mod tests {
     }
 
     #[test]
+    fn non_local_zero_or_more_supports_grassmann_boundaries_and_stacked_closures()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let inv = test_inventory()?;
+
+        // Grassmann's Law: [+stop, +aspirated] > [-aspirated] / _ [-aspirated]* [+aspirated]
+        let grassmann = Rule::new(
+            "R_GRASSMANN",
+            "Grassmann's Law",
+            vec![Pattern::Features(
+                FeaturePattern::new()
+                    .with_manner(Manner::Stop)
+                    .with_aspirated(true),
+            )],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: FeatureMutation::new().set_aspirated(false),
+            }],
+            vec![],
+            vec![
+                ContextElement::ZeroOrMore(Pattern::Features(
+                    FeaturePattern::new().with_aspirated(false),
+                )),
+                ContextElement::Segment(Pattern::Features(
+                    FeaturePattern::new().with_aspirated(true),
+                )),
+            ],
+            ApplicationMode::LeftToRight,
+        )?;
+
+        assert_eq!(
+            apply_rule(&Word::from_spaced("th i kh e", &inv)?, &grassmann, &inv)?.to_spaced(),
+            "t i kh e"
+        );
+        // Three aspirates: LeftToRight deaspirates first and second, keeping the last.
+        assert_eq!(
+            apply_rule(&Word::from_spaced("ph a th e kh", &inv)?, &grassmann, &inv)?.to_spaced(),
+            "p a t e kh"
+        );
+        // Single aspirate must remain aspirated.
+        assert_eq!(
+            apply_rule(&Word::from_spaced("th e o s", &inv)?, &grassmann, &inv)?.to_spaced(),
+            "th e o s"
+        );
+
+        // Non-local left and right contexts combined with WordBoundary and stacked ZeroOrMore.
+        let vowels = Pattern::Features(FeaturePattern::new().with_manner(Manner::Vowel));
+        let boundary_and_stacked = Rule::new(
+            "R_NONLOCAL_BOUND",
+            "Delete t after # V* and before V* V* #",
+            vec![Pattern::Literal("t".to_owned())],
+            vec![],
+            vec![
+                ContextElement::WordBoundary,
+                ContextElement::ZeroOrMore(vowels.clone()),
+            ],
+            vec![
+                ContextElement::ZeroOrMore(vowels.clone()),
+                ContextElement::ZeroOrMore(vowels),
+                ContextElement::WordBoundary,
+            ],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(
+                &Word::from_spaced("a e t o u", &inv)?,
+                &boundary_and_stacked,
+                &inv
+            )?
+            .to_spaced(),
+            "a e o u"
+        );
+        // Consonant before `#` blocks right context `V* V* #`.
+        assert_eq!(
+            apply_rule(
+                &Word::from_spaced("a e t o s", &inv)?,
+                &boundary_and_stacked,
+                &inv
+            )?
+            .to_spaced(),
+            "a e t o s"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn directional_modes_feed_bleed_and_terminate_for_n_to_m_and_epenthesis()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let inv = test_inventory()?;
+
+        // LeftToRight progressive feeding: `a > e / e C* _` across consonants.
+        let non_vowels = Pattern::Features(FeaturePattern::new().with_syllabic(false));
+        let prog_harmony = Rule::new(
+            "R_PROG",
+            "Progressive vowel harmony",
+            vec![Pattern::Literal("a".to_owned())],
+            vec![ReplacementItem::Literal("e".to_owned())],
+            vec![
+                ContextElement::Segment(Pattern::Literal("e".to_owned())),
+                ContextElement::ZeroOrMore(non_vowels.clone()),
+            ],
+            vec![],
+            ApplicationMode::LeftToRight,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("e t a k a", &inv)?, &prog_harmony, &inv)?.to_spaced(),
+            "e t e k e"
+        );
+
+        // RightToLeft regressive feeding: `a > e / _ C* e`.
+        let reg_harmony = Rule::new(
+            "R_REG",
+            "Regressive vowel harmony",
+            vec![Pattern::Literal("a".to_owned())],
+            vec![ReplacementItem::Literal("e".to_owned())],
+            vec![],
+            vec![
+                ContextElement::ZeroOrMore(non_vowels),
+                ContextElement::Segment(Pattern::Literal("e".to_owned())),
+            ],
+            ApplicationMode::RightToLeft,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a t a k e", &inv)?, &reg_harmony, &inv)?.to_spaced(),
+            "e t e k e"
+        );
+
+        // RightToLeft vs LeftToRight on overlapping `a a > b` over `"a a a"`.
+        let degem_ltr = Rule::new(
+            "R_LTR",
+            "Degeminate LTR",
+            vec![
+                Pattern::Literal("a".to_owned()),
+                Pattern::Literal("a".to_owned()),
+            ],
+            vec![ReplacementItem::Literal("b".to_owned())],
+            vec![],
+            vec![],
+            ApplicationMode::LeftToRight,
+        )?;
+        let degem_rtl = Rule::new(
+            "R_RTL",
+            "Degeminate RTL",
+            vec![
+                Pattern::Literal("a".to_owned()),
+                Pattern::Literal("a".to_owned()),
+            ],
+            vec![ReplacementItem::Literal("b".to_owned())],
+            vec![],
+            vec![],
+            ApplicationMode::RightToLeft,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a a a", &inv)?, &degem_ltr, &inv)?.to_spaced(),
+            "b a"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a a a", &inv)?, &degem_rtl, &inv)?.to_spaced(),
+            "a b"
+        );
+
+        // LeftToRight 1 -> 2 (`e > e a`) must not re-scan its own emitted `e`.
+        let diph_ltr = Rule::new(
+            "R_DIPH_LTR",
+            "Non-looping 1->2",
+            vec![Pattern::Literal("e".to_owned())],
+            vec![
+                ReplacementItem::Literal("e".to_owned()),
+                ReplacementItem::Literal("a".to_owned()),
+            ],
+            vec![],
+            vec![],
+            ApplicationMode::LeftToRight,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("t e t e", &inv)?, &diph_ltr, &inv)?.to_spaced(),
+            "t e a t e a"
+        );
+
+        // Directional epenthesis (0 -> 1) in both LeftToRight and RightToLeft.
+        let epen_ltr = Rule::new(
+            "R_EPEN_LTR",
+            "Insert e after t",
+            vec![],
+            vec![ReplacementItem::Literal("e".to_owned())],
+            vec![ContextElement::Segment(Pattern::Literal("t".to_owned()))],
+            vec![],
+            ApplicationMode::LeftToRight,
+        )?;
+        let epen_rtl = Rule::new(
+            "R_EPEN_RTL",
+            "Insert e before t",
+            vec![],
+            vec![ReplacementItem::Literal("e".to_owned())],
+            vec![],
+            vec![ContextElement::Segment(Pattern::Literal("t".to_owned()))],
+            ApplicationMode::RightToLeft,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("t s t", &inv)?, &epen_ltr, &inv)?.to_spaced(),
+            "t e s t e"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("t s t", &inv)?, &epen_rtl, &inv)?.to_spaced(),
+            "e t s e t"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn derive_excludes_vacuous_matches_from_trace() -> Result<(), Box<dyn std::error::Error>> {
         let inv = test_inventory()?;
         let vacuous_stop_voicing = Rule::new(
@@ -517,7 +856,6 @@ mod tests {
             ApplicationMode::Simultaneous,
         )?;
 
-        // `b` is already a voiced stop, so `R_VAC` matches but produces no change.
         let word_already_voiced = Word::from_spaced("a b a m", &inv)?;
         let trace = derive(
             &word_already_voiced,
@@ -527,7 +865,6 @@ mod tests {
         assert_eq!(trace.final_word().to_spaced(), "a b a");
         assert_eq!(trace.fired_rule_ids(), vec!["R_DEL_M"]);
 
-        // Pure vacuous derivation returns zero steps.
         let vacuous_only = derive(
             &Word::from_spaced("a b a", &inv)?,
             &[vacuous_stop_voicing],
@@ -540,11 +877,10 @@ mod tests {
     }
 
     #[test]
-    fn engine_errors_cover_unmapped_bundle_unknown_symbol_and_unsupported_features()
+    fn engine_errors_cover_unmapped_bundle_and_unknown_symbol()
     -> Result<(), Box<dyn std::error::Error>> {
         let inv = test_inventory()?;
 
-        // Voicing `f` produces voiced labiodental fricative (`v`), which is absent from `test_inventory`.
         let voice_f = Rule::new(
             "R_UNMAPPED",
             "Voice f",
@@ -577,38 +913,6 @@ mod tests {
         assert_eq!(
             apply_rule(&Word::from_spaced("a", &inv)?, &unknown_lit, &inv),
             Err(EngineError::UnknownSymbol("z".to_owned()))
-        );
-
-        for mode in [ApplicationMode::LeftToRight, ApplicationMode::RightToLeft] {
-            let directional = Rule::new(
-                "R_DIR",
-                "Directional",
-                vec![Pattern::Literal("a".to_owned())],
-                vec![],
-                vec![],
-                vec![],
-                mode,
-            )?;
-            assert_eq!(
-                apply_rule(&Word::from_spaced("a", &inv)?, &directional, &inv),
-                Err(EngineError::UnsupportedMode(mode))
-            );
-        }
-
-        let nonlocal = Rule::new(
-            "R_NONLOCAL",
-            "Non-local context",
-            vec![Pattern::Literal("a".to_owned())],
-            vec![],
-            vec![ContextElement::ZeroOrMore(Pattern::Literal("s".to_owned()))],
-            vec![],
-            ApplicationMode::Simultaneous,
-        )?;
-        assert_eq!(
-            apply_rule(&Word::from_spaced("a", &inv)?, &nonlocal, &inv),
-            Err(EngineError::UnsupportedContext {
-                rule_id: "R_NONLOCAL".to_owned()
-            })
         );
         Ok(())
     }
