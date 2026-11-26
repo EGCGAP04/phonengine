@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Fixed the Attic stage of the `SPEC.md` dialect-tree example, which lacked the shared `aː > eː` raising that its `r _` reversion depends on, noted the inventory it omits, listed `RuleError::EmptyId` among the rule validations, and mentioned the minimum supported Rust version in `README.md`.
 - `tokenize_word` attaches `ˈ`/`ˌ` to the next syllabic segment, as IPA writes the marker before the syllable (`tʰeˈkʰaːs` now stresses `aː`, not `kʰ`); a second marker before that segment is a `DuplicateStressMarker`, and a word with no syllabic segment after the marker is a `DanglingStressMarker`.
 - `Word::to_spaced` / `Display` prefix stressed segments with `ˈ`/`ˌ` (`t e kʰ ˈeː s`), and `Word::from_spaced` reads those prefixes back, so the spaced format round-trips.
 - `parse_program` validates symbols automatically when the program declares at least one `segment`.
