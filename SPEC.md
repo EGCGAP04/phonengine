@@ -19,7 +19,8 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
 5. **Núcleo `std`-only**: `phonology`, `engine` y `dsl` usan exclusivamente la librería estándar
    de Rust. Crates externos solo en `cli` (Hito 4).
 6. **Convención Unicode**: Toda entrada debe estar en UTF-8 NFC. En el Hito 1 los segmentos se
-   ingresan separados por espacios (`v i t a m`); en el Hito 2 el tokenizador *maximal munch*
+   ingresan separados por espacios (`v i t a m`, con prefijo `ˈ`/`ˌ` opcional para el acento:
+   `v ˈi t a m`); en el Hito 2 el tokenizador *maximal munch*
    (`tokenize_word`) consume palabras sin espacios usando los símbolos del inventario ordenados por
    longitud descendente en bytes y soporta marcas IPA de acento `ˈ` (U+02C8) y `ˌ` (U+02CC).
 
@@ -43,6 +44,19 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
   }
   ```
   El acento (`Stress`) queda fuera de `FeatureBundle` para evitar explosión combinatoria en `Inventory`.
+- **Coherencia de `Segment` con el inventario**: los campos de `Segment` son públicos.
+  `Inventory::segment`, `Word::from_spaced` y `tokenize_word` construyen segmentos coherentes
+  (`symbol` ↔ `bundle`); quien construya un `Segment` a mano es responsable de esa coherencia, porque
+  `Pattern::Literal` y `NaturalClass` comparan `symbol` mientras que `FeaturePattern` compara `bundle`.
+- **Formato espaciado con acento (`Word::to_spaced` / `Display` y `Word::from_spaced`)**:
+  - `to_spaced` (y `Display`) escribe cada segmento como su símbolo, precedido de `ˈ` si tiene
+    `Stress::Primary` o de `ˌ` si tiene `Stress::Secondary`, separados por espacios (`t e kʰ ˈeː s`).
+  - `from_spaced` acepta ese prefijo: si un token no es un símbolo registrado, empieza con una marca de
+    acento que no está registrada como símbolo y el resto sí es un símbolo registrado, el segmento
+    recibe el acento de la marca. En cualquier otro caso devuelve `InventoryError::UnknownSymbol` con el
+    token completo.
+  - Si ninguna marca está registrada como símbolo, el formato es reversible:
+    `Word::from_spaced(&word.to_spaced(), inventory) == Ok(word)`.
 - **Patrones y mutaciones explícitos**:
   - `FieldMatch<T>`: `Any`, `Is(T)`, `IsNone` (usado en `FeaturePattern` para consultar campos `Option<T>`).
   - `FieldUpdate<T>`: `Keep`, `Set(T)`, `Clear` (usado en `FeatureMutation` para actualizar campos `Option<T>`).
@@ -53,7 +67,7 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
   `BTreeMap<FeatureBundle, String>`). `Inventory::insert()` valida unicidad en ambas direcciones
   y devuelve `Result<(), InventoryError>`. Toda mutación por rasgos se resuelve mediante
   `Inventory::resolve(&bundle)`; si el resultado no existe en el inventario, devuelve
-  `Err(EngineError::UnmappedFeatureBundle(bundle))`.
+  `Err(EngineError::UnmappedFeatureBundle { rule_id, bundle })`.
 
 ## Semántica del motor de reglas (`src/engine/`)
 - **Estructura de `Rule`**:
@@ -62,13 +76,22 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
   - `replacement: Vec<ReplacementItem>` (`Literal(String)` o `Mutate { source_index: usize, mutation: FeatureMutation }`)
   - `left_context: Vec<ContextElement>` y `right_context: Vec<ContextElement>`
   - `mode: ApplicationMode` (`Simultaneous`, `LeftToRight`, `RightToLeft`)
+- **Acento en el reemplazo** (sea `matched` el tramo de $N$ segmentos que coincidió con `target`):
+  - `Mutate { source_index: k, .. }` conserva el acento de `matched[k]`.
+  - `Literal` en la posición `i` del reemplazo hereda el acento de `matched[i]` si `i < N` y ningún
+    `Mutate` del mismo reemplazo tiene `source_index == i` (ese segmento ya conserva su acento por otra
+    vía). En cualquier otro caso, incluida la epéntesis ($N = 0$), emite `Stress::Unstressed`.
+  - Ejemplos: `o > u` sobre `pˈo` da `pˈu`; `r t > t r` mantiene el acento por posición, mientras que
+    `r t > $2 $1` lo mueve con cada segmento; `e > i e` acentúa `i` (posición 0), mientras que
+    `e > i $1` acentúa solo `e`.
 - **`ContextElement`**:
   - `WordBoundary` (`#`)
   - `Segment(Pattern)`
   - `ZeroOrMore(Pattern)`: clausura de Kleene no local (`Patrón*`, p. ej. ley de Grassmann o armonía vocálica). En `matches_left_context` y `matches_right_context` se evalúa de forma determinista mediante alcanzabilidad DP / autómata finito sobre índices usando `Vec<bool>` en tiempo $O(|palabra| \cdot |contexto|)$ (sin recursión ni *backtracking* exponencial ante secuencias como `V* V*`), manteniendo compatibilidad exacta con `WordBoundary` (`#`) y `Segment(Pattern)`.
 - **Validaciones obligatorias de regla (`RuleError`)**:
-  - Rechazar inserciones sin contexto (`target.is_empty()` con ambos contextos vacíos) con `RuleError::UnconstrainedInsertion`.
+  - Rechazar inserciones sin anclaje con `RuleError::UnconstrainedInsertion`: `target.is_empty()` cuando ningún contexto contiene un `WordBoundary` o un `Segment(Pattern)`. Un contexto formado solo por elementos `ZeroOrMore` coincide en cualquier brecha, así que no restringe la inserción.
   - Rechazar `Mutate { source_index, .. }` fuera de rango (`source_index >= target.len()`) con `RuleError::InvalidSourceIndex`.
+  - Rechazar un `WordBoundary` fuera del borde exterior del contexto con `RuleError::MisplacedWordBoundary { rule_id }`: en `left_context` solo puede ser el primer elemento y en `right_context` solo el último (como máximo uno por lado). En otra posición nunca podría coincidir.
 - **Modos de ejecución (`ApplicationMode`)**:
   - **`Simultaneous`**: evalúa todas las coincidencias no solapadas de izquierda a derecha sobre un *snapshot* inmutable de la palabra antes de construir la salida (evita cascadas y bucles infinitos).
   - **`LeftToRight`**: pasada única de izquierda a derecha con mutación progresiva sobre la palabra `current` (permite *feeding* y *bleeding* deterministas con terminación garantizada en $O(|palabra|)$):
@@ -79,15 +102,21 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
     - Para epéntesis ($N = 0$): recorre `pos` desde `current.len()` hasta `0`; cada inserción de $M$ segmentos en `pos` queda visible en el `right_context` de las posiciones anteriores.
 - **Errores del motor (`EngineError`)**:
   - En el Hito 3 se implementan `LeftToRight`, `RightToLeft` y `ZeroOrMore`, por lo que se eliminan las variantes transitorias `UnsupportedMode` y `UnsupportedContext` del Hito 1/2.
-  - Se agrega `EngineError::UnknownStage(String)` para consultas sobre etapas inexistentes en un `DialectTree`.
+  - Variantes:
+    - `UnmappedFeatureBundle { rule_id: String, bundle: FeatureBundle }`: una mutación produjo un bundle ausente del inventario.
+    - `UnknownSymbol { rule_id: String, symbol: String }`: un `ReplacementItem::Literal` no está registrado en el inventario.
+    - `UnknownStage(String)`: consulta sobre una etapa inexistente en un `DialectTree`.
+    - `InvalidRule(RuleError)`: defensiva, si se violan invariantes de `Rule` durante la evaluación.
+    - `StageFailed { stage_id: String, source: Box<EngineError> }`: `derive_stage` y `derive_tree` envuelven así cualquier error producido al evaluar las reglas de una etapa.
+  - Todo error de aplicación identifica la regla (`rule_id`) y, dentro de un árbol, la etapa. `Error::source()` de `StageFailed` devuelve el error envuelto, y `Display` encadena el contexto (`stage "attic": rule "a_raising": ...`).
 - **Alcance diferido**:
   - Las variables de asimilación (notación $\alpha$, ej. `[αplace]`) quedan explícitamente fuera de los Hitos 1, 2 y 3.
 
 ## Árbol de dialectos y etapas cronológicas (`src/engine/dialect.rs`)
 - **Nodos y árbol (`DialectNode`, `DialectTree`)**:
   - `DialectNode`: `id: String`, `name: String`, `parent: Option<String>`, `rules: Vec<Rule>`.
-  - `DialectTree`: almacena los nodos en `BTreeMap<String, DialectNode>` (determinismo estricto) y comparte un único `Inventory` para toda la familia lingüística.
-  - Los `id` de regla deben ser únicos **dentro de cada etapa** (desambiguados por `stage_id` en `StageTrace`).
+  - `DialectTree`: almacena los nodos en `BTreeMap<String, DialectNode>` (determinismo estricto). Todas las etapas se evalúan contra un mismo `Inventory`, que se pasa en cada llamada a `derive_stage` / `derive_tree` (el árbol no lo almacena).
+  - Los `id` de regla deben ser únicos **dentro de cada etapa** (desambiguados por `stage_id` en `StageTrace`); `DialectTree::new` lo valida.
 - **Validaciones (`DialectError`, implementa `Display` y `std::error::Error`)**:
   - `EmptyTree`: árbol sin etapas.
   - `EmptyStageId`: etapa con `id` vacío o solo espacios.
@@ -95,9 +124,10 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
   - `UnknownParent { stage_id: String, parent_id: String }`: referencia a una etapa padre inexistente.
   - `MissingRoot` / `MultipleRoots(Vec<String>)`: el árbol debe tener exactamente una raíz (`parent: None`).
   - `CycleDetected(Vec<String>)`: ciclo en las referencias `parent`.
+  - `DuplicateRuleId { stage_id: String, rule_id: String }`: dos reglas con el mismo `id` dentro de una etapa.
 - **Evaluación y trazabilidad (`StageTrace`, `DialectTrace`, `TreeDerivation`)**:
   - `StageTrace { stage_id: String, stage_name: String, trace: DerivationTrace }`: envuelve la derivación de una etapa (omitiendo pasos vacuos en `trace`).
-  - `DialectTree::derive_stage(&self, initial: &Word, target_stage: &str, inventory: &Inventory) -> Result<DialectTrace, EngineError>`: ejecuta las etapas en orden cronológico a lo largo del camino raíz → `target_stage`, devolviendo `DialectTrace { initial, target_stage, stages: Vec<StageTrace>, final_word }` (o `Err(EngineError::UnknownStage)`).
+  - `DialectTree::derive_stage(&self, initial: &Word, target_stage: &str, inventory: &Inventory) -> Result<DialectTrace, EngineError>`: ejecuta las etapas en orden cronológico a lo largo del camino raíz → `target_stage`, devolviendo `DialectTrace { initial, target_stage, stages: Vec<StageTrace>, final_word }` (o `Err(EngineError::UnknownStage)` si `target_stage` no existe; los errores de una etapa llegan envueltos en `EngineError::StageFailed`).
   - `DialectTree::derive_tree(&self, initial: &Word, inventory: &Inventory) -> Result<TreeDerivation, EngineError>`: recorre todo el árbol en orden topológico/DFS determinista **reutilizando** el `final_word` de cada etapa padre al evaluar sus hijas (sin recalcular ancestros compartidos). Expone `root_id()`, `initial()`, `stages() -> &BTreeMap<String, StageTrace>`, `word_at(stage_id) -> Option<&Word>`, `path_to(stage_id) -> Option<Vec<&StageTrace>>` y `leaf_outcomes() -> BTreeMap<&str, &Word>` (base directa para comparación de dialectos).
 
 ## Estructura de módulos
@@ -112,13 +142,14 @@ src/
 tests/
 ├── fixtures/        # Casos de prueba golden (TSV)
 ├── golden_mvp.rs    # Suite de integración contra fixtures
-└── dsl_mvp.rs       # Suite de integración DSL + maximal munch
+├── dsl_mvp.rs       # Suite de integración DSL + maximal munch
+└── dialect_tree.rs  # Suite de integración de árboles de dialectos, bloques stage y modos direccionales
 ```
 
 ## Hoja de ruta
 - **Hito 1 (Completado)**: `phonology/` + `engine/` + `tests/golden_mvp.rs` pasando.
 - **Hito 2 (Completado)**: `dsl/` (parser *recursive descent* manual, declaraciones `segment`/`class`/`rule`, diagnósticos con `Span`, tokenizador *maximal munch* con marcas de acento `ˈ`/`ˌ`).
-- **Hito 3 (Actual)**: Árbol de dialectos y etapas cronológicas (`DialectTree`, bloques `stage` en DSL), modos direccionales (`LeftToRight`, `RightToLeft`) y contextos no locales (`ZeroOrMore`).
+- **Hito 3 (Actual)**: Árbol de dialectos y etapas cronológicas (`DialectTree`, bloques `stage` en DSL), modos direccionales (`LeftToRight`, `RightToLeft`) y contextos no locales (`ZeroOrMore`). Incluye las correcciones de la revisión de los Hitos 0–3: herencia de acento en reemplazos literales, validación de `#` y de inserciones, errores con contexto de regla y etapa, acento en el formato espaciado y diagnósticos del DSL.
 - **Hito 4**: CLI con `clap` y exportación a Markdown / JSON.
 
 ## Lenguaje DSL y tokenizador maximal munch (`src/dsl/`)
@@ -131,9 +162,12 @@ El parser *recursive descent* manual expone `parse_program(source: &str) -> Resu
 - `dialect_tree: Option<DialectTree>`: `Some(tree)` si el archivo declara bloques `stage`, o `None` si usa reglas planas de nivel superior.
 
 Adicionalmente, `Program::validate_against(&self, inventory: &Inventory) -> Result<(), DslError>` verifica que todos los símbolos literales usados en `class`, `Pattern::Literal` y `ReplacementItem::Literal` (tanto en reglas de nivel superior como dentro de etapas `stage`) existan en un `Inventory` dado.
+- **Validación automática**: si el programa declara al menos un `segment`, `parse_program` ejecuta `validate_against(&inventory)` sobre ese inventario antes de devolverlo. Si no declara ninguno (inventario externo), quien llama debe ejecutar `validate_against` con el inventario que vaya a usar.
+- **Clases usadas antes de declararse**: si un símbolo desconocido de un patrón (`target` o contexto) coincide con el nombre de una `class` declarada más adelante, el error es `DslErrorKind::ClassUsedBeforeDeclaration(String)` en lugar de `UnknownSymbol`.
+- `validate_against` revisa los símbolos registrados durante el parseo: las reglas que se agreguen o modifiquen después en `Program` no se revalidan.
 
 ### Léxico y comentarios
-- Entrada en UTF-8 NFC.
+- Entrada en UTF-8 NFC. Un BOM UTF-8 (U+FEFF) al inicio de la fuente se ignora: los offsets en bytes de `Span` siguen contando desde el inicio real del texto, y la columna del primer carácter es 1.
 - Comentarios de línea con `//` hasta el final de la línea (no usar `#`, que representa `ContextElement::WordBoundary`).
 - Palabras reservadas de inicio de declaración: `segment`, `class`, `rule`, `stage` (`from` es palabra clave contextual en la cabecera de `stage`).
 - Símbolos fonológicos e identificadores sin comillas: secuencias Unicode sin espacios que no contengan operadores ni delimitadores del DSL (`{ } [ ] ( ) , : = > / _ # * + - $ " ;`). Se permiten `-` y `_` internos en identificadores/rasgos compuestos (`mid-high`, `mid-low`, `left-to-right`, `right-to-left`, `final_m_loss`), mientras que un `-` inicial siempre se tokeniza como signo negativo y un `_` inicial o aislado siempre se tokeniza como marcador de foco del contexto (`_`).
@@ -188,8 +222,8 @@ rule <id> ["<nombre>"] [(simultaneous | left-to-right | right-to-left)]:
     - `$k[...]` sin espacio entre `$k` y `[` aplica la mutación especificada al segmento `k - 1` (si hay espacio entre `$k` y `[`, se interpretan como dos ítems distintos).
     - `$0` o `$k > target.len()` producen error de diagnóstico.
 - **Contexto (`/ <left_context> _ <right_context>`)**:
-  - Opcional; si aparece `/`, exige exactamente un `_`.
-  - Soporta `#` (`ContextElement::WordBoundary`), `<patrón>` (`ContextElement::Segment`) y `<patrón>*` (`ContextElement::ZeroOrMore`).
+  - Opcional; si aparece `/`, exige exactamente un `_`. Si no hay un `_` aislado pero algún identificador del contexto contiene `_` (p. ej. `V_V`, que se lexea como un solo identificador), el error es `DslErrorKind::FocusInsideIdentifier(String)` en lugar de `MissingContextFocus`, para sugerir separar el foco con espacios (`V _ V`).
+  - Soporta `#` (`ContextElement::WordBoundary`), `<patrón>` (`ContextElement::Segment`) y `<patrón>*` (`ContextElement::ZeroOrMore`). Un `#` fuera del borde exterior se rechaza con `RuleError::MisplacedWordBoundary`.
 - **Validaciones finales**: rechazar IDs de regla duplicados en el mismo ámbito (nivel superior o misma etapa `stage`); cada regla se construye mediante `Rule::new` (propagando `RuleError` envuelto en `DslError` con el `Span` de la regla).
 
 ### Declaración de etapas y árbol de dialectos (`stage`)
@@ -203,19 +237,21 @@ stage <id> ["<nombre>"] [from <padre_id>] {
 - Si se omite `from <padre_id>`, la etapa es raíz (`parent: None`).
 - El cuerpo `{ ... }` admite cero o más declaraciones `rule` (los IDs de regla deben ser únicos dentro de cada etapa).
 - No se pueden mezclar declaraciones `rule` sueltas de nivel superior y bloques `stage` en el mismo archivo (`DslErrorKind::MixedTopLevelRulesAndStages`).
-- El árbol resultante se valida con `DialectTree::new`, envolviendo cualquier `DialectError` en `DslErrorKind::InvalidDialectTree(DialectError)`.
+- El árbol resultante se valida con `DialectTree::new`, envolviendo cualquier `DialectError` en `DslErrorKind::InvalidDialectTree(DialectError)`. El `Span` apunta a la cabecera de la etapa involucrada; para `DuplicateStageId`, a la declaración repetida (no a la primera).
 
 ### Diagnósticos (`Span` y `DslError`)
 - `Span { start: usize, end: usize, line: usize, column: usize }`: offsets en bytes `[start, end)` y posición inicial 1-based en escalares Unicode (`line`, `column`).
-- `DslError { kind: DslErrorKind, span: Span }`: implementa `Display` (formato `<line>:<column>: <mensaje>`) y `std::error::Error`, cubriendo errores léxicos, sintácticos, semánticos (clases duplicadas/vacías, referencias `$k` inválidas, colisiones de `Inventory`, IDs de regla duplicados) y `RuleError`.
+- `DslError { kind: DslErrorKind, span: Span }`: implementa `Display` (formato `<line>:<column>: <mensaje>`) y `std::error::Error`, cubriendo errores léxicos, sintácticos, semánticos (clases duplicadas/vacías, referencias `$k` inválidas, colisiones de `Inventory`, IDs de regla duplicados, símbolos desconocidos y clases usadas antes de declararse) y `RuleError`.
 
 ### Tokenizador *maximal munch* (`tokenize_word`)
 - Firma pública: `tokenize_word(input: &str, inventory: &Inventory) -> Result<Word, TokenizeError>`.
 - Orden determinista de candidatos del inventario: `(Reverse(symbol.len()), symbol)` (longitud descendente en bytes y desempate lexicográfico).
 - Rechaza espacios en blanco dentro de la palabra (`UnexpectedWhitespace`).
-- En cada posición intenta primero el prefijo más largo registrado en `inventory`; si ninguno coincide, reconoce las marcas IPA de acento `'ˈ'` (U+02C8 → `Stress::Primary`) y `'ˌ'` (U+02CC → `Stress::Secondary`), aplicándolas al segmento inmediatamente siguiente (salvo que la marca estuviera registrada explícitamente en `inventory`).
-- Errores estructurados en `TokenizeError` (con `offset` en bytes y `column` 1-based en escalares Unicode, implementando `Display` y `std::error::Error`): `UnknownSegment`, `UnexpectedWhitespace`, `DuplicateStressMarker`, `DanglingStressMarker`.
+- En cada posición intenta primero el prefijo más largo registrado en `inventory`; si ninguno coincide, reconoce las marcas IPA de acento `'ˈ'` (U+02C8 → `Stress::Primary`) y `'ˌ'` (U+02CC → `Stress::Secondary`), salvo que la marca estuviera registrada explícitamente en `inventory`.
+- Como en IPA la marca precede a la sílaba, el acento se asigna al **siguiente segmento silábico** (`bundle.syllabic == true`), salteando los no silábicos intermedios: `ˈvita` acentúa `i` y `tʰeˈkʰaːs` acentúa `aː`. Poner la marca justo antes de la vocal (`vˈita`) da el mismo resultado.
+- Errores estructurados en `TokenizeError` (con `offset` en bytes y `column` 1-based en escalares Unicode, implementando `Display` y `std::error::Error`): `UnknownSegment`, `UnexpectedWhitespace`, `DuplicateStressMarker` (otra marca antes de llegar a un segmento silábico) y `DanglingStressMarker` (la palabra termina sin un segmento silábico después de la marca).
 - La entrada vacía `""` produce `Ok(Word::new(vec![]))`.
+- **Limitación conocida**: el *munch* es voraz y sin *backtracking*. Con el inventario `{a, ab, bc}`, `abc` falla en `c` aunque `a` + `bc` sería una segmentación válida.
 
 ### Ejemplo completo en DSL
 ```text
