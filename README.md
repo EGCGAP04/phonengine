@@ -14,6 +14,8 @@ See [`SPEC.md`](SPEC.md) for the full technical specification.
 
 ## Commands
 
+Requires Rust 1.88 or later (the `rust-version` declared in `Cargo.toml`).
+
 ```bash
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings

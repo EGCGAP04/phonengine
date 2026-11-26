@@ -89,6 +89,7 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
   - `Segment(Pattern)`
   - `ZeroOrMore(Pattern)`: clausura de Kleene no local (`Patrón*`, p. ej. ley de Grassmann o armonía vocálica). En `matches_left_context` y `matches_right_context` se evalúa de forma determinista mediante alcanzabilidad DP / autómata finito sobre índices usando `Vec<bool>` en tiempo $O(|palabra| \cdot |contexto|)$ (sin recursión ni *backtracking* exponencial ante secuencias como `V* V*`), manteniendo compatibilidad exacta con `WordBoundary` (`#`) y `Segment(Pattern)`.
 - **Validaciones obligatorias de regla (`RuleError`)**:
+  - Rechazar un `id` vacío o formado solo por espacios con `RuleError::EmptyId`.
   - Rechazar inserciones sin anclaje con `RuleError::UnconstrainedInsertion`: `target.is_empty()` cuando ningún contexto contiene un `WordBoundary` o un `Segment(Pattern)`. Un contexto formado solo por elementos `ZeroOrMore` coincide en cualquier brecha, así que no restringe la inserción.
   - Rechazar `Mutate { source_index, .. }` fuera de rango (`source_index >= target.len()`) con `RuleError::InvalidSourceIndex`.
   - Rechazar un `WordBoundary` fuera del borde exterior del contexto con `RuleError::MisplacedWordBoundary { rule_id }`: en `left_context` solo puede ser el primer elemento y en `right_context` solo el último (como máximo uno por lado). En otra posición nunca podría coincidir.
@@ -137,7 +138,7 @@ src/
 ├── main.rs          # Punto de entrada mínimo (CLI completo en Hito 4)
 ├── phonology/       # Features, Pattern/Mutation, Segment, Inventory, Word
 ├── engine/          # Rule, Context (local y ZeroOrMore), Applier (3 modos), DialectTree, DerivationTrace, Errors
-├── dsl/             # Lexer, Parser recursive descent, AST (incl. stage), diagnósticos y maximal munch
+├── dsl/             # Lexer, parser recursive descent (`Program`, incl. `stage`), diagnósticos y maximal munch
 └── cli/             # (Hito 4) Comandos: run, trace, compare
 tests/
 ├── fixtures/        # Casos de prueba golden (TSV)
@@ -286,6 +287,8 @@ rule comp_lengthening:
 
 ### Ejemplo de árbol de dialectos en DSL (Hito 3)
 ```text
+// Inventario omitido (p, pʰ, t, tʰ, k, kʰ, s, h, r, n, a, aː, e, eː, i, o, u):
+// la versión completa está en tests/dialect_tree.rs.
 class V = { a, aː, e, eː, i, o, u }
 
 stage pie "Proto-Indo-European" {}
@@ -298,8 +301,12 @@ stage proto_greek "Proto-Greek" from pie {
     s > h / # _ V
 }
 
+// El ático y el jónico comparten la elevación aː > eː; el ático la revierte tras r.
 stage attic "Attic Greek" from proto_greek {
-  rule eta_reversion:
+  rule a_raising:
+    aː > eː
+
+  rule alpha_purum "Attic alpha purum":
     eː > aː / r _
 }
 
