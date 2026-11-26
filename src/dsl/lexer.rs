@@ -133,6 +133,8 @@ fn is_ident_char(ch: char) -> bool {
         )
 }
 
+const BYTE_ORDER_MARK: char = '\u{FEFF}';
+
 struct Scanner<'a> {
     source: &'a str,
     pos: usize,
@@ -141,10 +143,19 @@ struct Scanner<'a> {
 }
 
 impl<'a> Scanner<'a> {
-    const fn new(source: &'a str) -> Self {
+    /// Creates a scanner, skipping a leading UTF-8 byte order mark (U+FEFF).
+    ///
+    /// Byte offsets still count from the real start of `source`, and the first character
+    /// after the mark is at column 1.
+    fn new(source: &'a str) -> Self {
+        let pos = if source.starts_with(BYTE_ORDER_MARK) {
+            BYTE_ORDER_MARK.len_utf8()
+        } else {
+            0
+        };
         Self {
             source,
-            pos: 0,
+            pos,
             line: 1,
             column: 1,
         }
@@ -494,6 +505,19 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn skips_a_leading_byte_order_mark_and_keeps_byte_offsets() -> Result<(), DslError> {
+        let tokens = lex("\u{FEFF}segment a")?;
+        assert_eq!(tokens[0].kind, TokenKind::Segment);
+        assert_eq!(tokens[0].span, Span::new(3, 10, 1, 1));
+        assert_eq!(tokens[1].kind, TokenKind::Ident("a".to_owned()));
+
+        // Only a leading mark is skipped; elsewhere it is an identifier character.
+        let inner = lex("a\u{FEFF}")?;
+        assert_eq!(inner[0].kind, TokenKind::Ident("a\u{FEFF}".to_owned()));
+        Ok(())
     }
 
     #[test]

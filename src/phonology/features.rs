@@ -142,6 +142,29 @@ pub enum Stress {
     Secondary,
 }
 
+impl Stress {
+    /// Returns the IPA marker written before a segment with this stress: `ˈ` (U+02C8) for
+    /// [`Stress::Primary`], `ˌ` (U+02CC) for [`Stress::Secondary`], and `None` when unstressed.
+    #[must_use]
+    pub const fn ipa_marker(self) -> Option<char> {
+        match self {
+            Self::Unstressed => None,
+            Self::Primary => Some('ˈ'),
+            Self::Secondary => Some('ˌ'),
+        }
+    }
+
+    /// Parses an IPA stress marker (`ˈ` or `ˌ`) into its [`Stress`] level.
+    #[must_use]
+    pub const fn from_ipa_marker(marker: char) -> Option<Self> {
+        match marker {
+            'ˈ' => Some(Self::Primary),
+            'ˌ' => Some(Self::Secondary),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for Stress {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let label = match self {
@@ -351,5 +374,17 @@ mod tests {
         assert!(rendered.contains("-long"));
         assert_eq!(Stress::default(), Stress::Unstressed);
         assert_eq!(Stress::Primary.to_string(), "primary");
+    }
+
+    #[test]
+    fn stress_ipa_markers_round_trip() {
+        for stress in [Stress::Primary, Stress::Secondary] {
+            let marker = stress.ipa_marker();
+            assert_eq!(marker.and_then(Stress::from_ipa_marker), Some(stress));
+        }
+        assert_eq!(Stress::Primary.ipa_marker(), Some('\u{02C8}'));
+        assert_eq!(Stress::Secondary.ipa_marker(), Some('\u{02CC}'));
+        assert_eq!(Stress::Unstressed.ipa_marker(), None);
+        assert_eq!(Stress::from_ipa_marker('\''), None);
     }
 }

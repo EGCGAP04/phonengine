@@ -8,6 +8,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `tokenize_word` attaches `ˈ`/`ˌ` to the next syllabic segment, as IPA writes the marker before the syllable (`tʰeˈkʰaːs` now stresses `aː`, not `kʰ`); a second marker before that segment is a `DuplicateStressMarker`, and a word with no syllabic segment after the marker is a `DanglingStressMarker`.
+- `Word::to_spaced` / `Display` prefix stressed segments with `ˈ`/`ˌ` (`t e kʰ ˈeː s`), and `Word::from_spaced` reads those prefixes back, so the spaced format round-trips.
+- `parse_program` validates symbols automatically when the program declares at least one `segment`.
 - `EngineError::UnmappedFeatureBundle` and `EngineError::UnknownSymbol` are now struct variants that carry the failing `rule_id`, and `DialectTree::derive_stage` / `derive_tree` wrap any error raised inside a stage in `EngineError::StageFailed { stage_id, source }`.
 - `RuleError::UnconstrainedInsertion` now also rejects insertions whose contexts contain only `ZeroOrMore` elements, which matched at every gap.
 - Aligned the GitHub configuration with the sibling repositories: `.gitignore` now ignores Claude Code personal config (`.claude/settings.local.json`, `CLAUDE.local.md`), and `.github/dependabot.yml` groups Cargo minor/patch updates (`cargo-minor-patch`).
@@ -21,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `Stress::ipa_marker` and `Stress::from_ipa_marker`, shared by the tokenizer and the spaced word format.
+- `DslErrorKind::ClassUsedBeforeDeclaration` and `DslErrorKind::FocusInsideIdentifier`.
 - `RuleError::MisplacedWordBoundary`, `DialectError::DuplicateRuleId`, and `EngineError::StageFailed`.
 - Milestone 3 rule engine & DSL support:
   - $O(|word| \cdot |context|)$ deterministic DP/NFA reachability matching for `ContextElement::ZeroOrMore`.
@@ -46,3 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A `#` that is not the outermost element of a context is rejected with `RuleError::MisplacedWordBoundary` instead of producing a rule that silently never matches.
 - `DialectTree::new` rejects duplicate rule IDs within a stage, which only the DSL used to catch.
 - Context matching no longer allocates for empty contexts, and the rustdoc of `ContextElement::ZeroOrMore` and `ApplicationMode` no longer describes them as deferred.
+- A typo in a literal pattern, or a class used before its declaration, is reported at parse time (for programs that declare segments) instead of producing a rule that silently never fires.
+- `DuplicateStageId` points at the repeated `stage` declaration instead of the first one.
+- A leading UTF-8 BOM no longer breaks parsing.
+- A context written as `V_V` (one identifier) reports `FocusInsideIdentifier` with a hint to separate the focus, instead of a bare missing-focus error.

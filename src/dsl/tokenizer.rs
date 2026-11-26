@@ -6,21 +6,24 @@ use crate::phonology::{FeatureBundle, Inventory, Segment, Stress, Word};
 
 use super::error::{TokenizeError, TokenizeErrorKind};
 
-const PRIMARY_STRESS_MARKER: char = 'ˈ';
-const SECONDARY_STRESS_MARKER: char = 'ˌ';
-
 /// Tokenizes an unspaced word string into a [`Word`] using deterministic maximal munch.
 ///
 /// Inventory symbols are ordered by descending byte length and lexicographically as a tie-breaker.
+/// The munch is greedy and never backtracks: with the inventory `{a, ab, bc}`, `"abc"` fails at
+/// `c` even though `a` + `bc` would be a valid segmentation.
+///
 /// IPA stress markers `'ˈ'` (`U+02C8`) and `'ˌ'` (`U+02CC`) apply [`Stress::Primary`] and
-/// [`Stress::Secondary`] to the immediately following segment unless explicitly registered as
-/// inventory symbols themselves.
+/// [`Stress::Secondary`] to the next syllabic segment (`bundle.syllabic`), skipping the
+/// non-syllabic segments in between, because IPA writes the marker before the syllable:
+/// `ˈvita` stresses `i`. Markers registered as inventory symbols are segments instead.
 ///
 /// # Errors
 ///
 /// - [`TokenizeErrorKind::UnexpectedWhitespace`] if `input` contains whitespace.
-/// - [`TokenizeErrorKind::DuplicateStressMarker`] if two stress markers precede a segment.
-/// - [`TokenizeErrorKind::DanglingStressMarker`] if a stress marker appears at the end of `input`.
+/// - [`TokenizeErrorKind::DuplicateStressMarker`] if a second marker appears before the previous
+///   one reached a syllabic segment.
+/// - [`TokenizeErrorKind::DanglingStressMarker`] if `input` ends with no syllabic segment after a
+///   marker.
 /// - [`TokenizeErrorKind::UnknownSegment`] if no inventory symbol or stress marker matches.
 pub fn tokenize_word(input: &str, inventory: &Inventory) -> Result<Word, TokenizeError> {
     if input.is_empty() {
@@ -58,16 +61,21 @@ pub fn tokenize_word(input: &str, inventory: &Inventory) -> Result<Word, Tokeniz
             .copied()
             .find(|(sym, _)| rest.starts_with(sym))
         {
-            let stress = pending_stress
-                .take()
-                .map_or(Stress::Unstressed, |(level, _, _, _)| level);
+            // A pending marker waits for the syllable nucleus.
+            let stress = if bundle.syllabic {
+                pending_stress
+                    .take()
+                    .map_or(Stress::Unstressed, |(level, _, _, _)| level)
+            } else {
+                Stress::Unstressed
+            };
             segments.push(Segment::new(sym, *bundle, stress));
             offset += sym.len();
             column += sym.chars().count();
             continue;
         }
 
-        if ch == PRIMARY_STRESS_MARKER || ch == SECONDARY_STRESS_MARKER {
+        if let Some(level) = Stress::from_ipa_marker(ch) {
             if pending_stress.is_some() {
                 return Err(TokenizeError::new(
                     TokenizeErrorKind::DuplicateStressMarker(ch),
@@ -75,11 +83,6 @@ pub fn tokenize_word(input: &str, inventory: &Inventory) -> Result<Word, Tokeniz
                     column,
                 ));
             }
-            let level = if ch == PRIMARY_STRESS_MARKER {
-                Stress::Primary
-            } else {
-                Stress::Secondary
-            };
             pending_stress = Some((level, ch, offset, column));
             offset += ch.len_utf8();
             column += 1;
@@ -146,12 +149,16 @@ mod tests {
     fn maximal_munch_prefers_longest_match_and_handles_stress_markers()
     -> Result<(), Box<dyn std::error::Error>> {
         let inv = sample_inventory()?;
+        // IPA places markers before the syllable; the stress lands on its vowel.
         let word = tokenize_word("ˌkʷaˈtʃaː", &inv)?;
-        assert_eq!(word.to_spaced(), "kʷ a tʃ aː");
-        assert_eq!(word.segments()[0].stress, Stress::Secondary);
-        assert_eq!(word.segments()[1].stress, Stress::Unstressed);
-        assert_eq!(word.segments()[2].stress, Stress::Primary);
-        assert_eq!(word.segments()[3].stress, Stress::Unstressed);
+        assert_eq!(word.to_spaced(), "kʷ ˌa tʃ ˈaː");
+        assert_eq!(word.segments()[0].stress, Stress::Unstressed);
+        assert_eq!(word.segments()[1].stress, Stress::Secondary);
+        assert_eq!(word.segments()[2].stress, Stress::Unstressed);
+        assert_eq!(word.segments()[3].stress, Stress::Primary);
+
+        // A marker right before the vowel gives the same word.
+        assert_eq!(tokenize_word("kʷˌatʃˈaː", &inv)?, word);
 
         let empty = tokenize_word("", &inv)?;
         assert!(empty.is_empty());
@@ -214,6 +221,54 @@ mod tests {
                 TokenizeErrorKind::DanglingStressMarker('ˈ'),
                 1,
                 2
+            ))
+        );
+
+        // The marker is still pending across `t`, so a second one is a duplicate.
+        let dup_across_onset = tokenize_word("ˈtˌa", &inv);
+        assert_eq!(
+            dup_across_onset,
+            Err(TokenizeError::new(
+                TokenizeErrorKind::DuplicateStressMarker('ˌ'),
+                'ˈ'.len_utf8() + 1,
+                3
+            ))
+        );
+
+        // No syllabic segment after the marker.
+        let no_nucleus = tokenize_word("aˈtk", &inv);
+        assert_eq!(
+            no_nucleus,
+            Err(TokenizeError::new(
+                TokenizeErrorKind::DanglingStressMarker('ˈ'),
+                1,
+                2
+            ))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn greedy_munch_does_not_backtrack() -> Result<(), InventoryError> {
+        let mut inv = Inventory::new();
+        inv.insert(
+            "a",
+            FeatureBundle::vowel(Height::Low, Backness::Central, false),
+        )?;
+        inv.insert(
+            "ab",
+            FeatureBundle::vowel(Height::Low, Backness::Back, false),
+        )?;
+        inv.insert(
+            "bc",
+            FeatureBundle::vowel(Height::High, Backness::Back, false),
+        )?;
+        assert_eq!(
+            tokenize_word("abc", &inv),
+            Err(TokenizeError::new(
+                TokenizeErrorKind::UnknownSegment("c".to_owned()),
+                2,
+                3
             ))
         );
         Ok(())
