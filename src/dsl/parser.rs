@@ -1,5 +1,6 @@
 //! Manual recursive-descent parser for the PhonEngine phonological rule DSL.
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::engine::{
@@ -26,7 +27,16 @@ pub struct Program {
     pub rules: Vec<Rule>,
     /// Rooted chronological dialect tree populated from `stage` blocks, if present.
     pub dialect_tree: Option<DialectTree>,
-    symbol_refs: Vec<(String, Span)>,
+    symbol_refs: Vec<SymbolRef>,
+}
+
+/// Literal segment symbol referenced in the source, recorded for [`Program::validate_against`].
+#[derive(Debug, Clone)]
+struct SymbolRef {
+    symbol: String,
+    span: Span,
+    /// `true` for target and context patterns, where a later `class` name may have been meant.
+    in_pattern: bool,
 }
 
 impl PartialEq for Program {
@@ -44,17 +54,24 @@ impl Program {
     /// Validates that every literal segment symbol referenced in `class` declarations,
     /// target/context patterns, and literal replacements exists in `inventory`.
     ///
+    /// Only the symbols recorded while parsing are checked: rules added to or changed in this
+    /// [`Program`] afterwards are not revalidated.
+    ///
     /// # Errors
     ///
-    /// Returns [`DslError`] with [`DslErrorKind::UnknownSymbol`] at the first unmapped symbol's
-    /// source [`Span`].
+    /// Returns [`DslError`] at the first unmapped symbol's source [`Span`], with
+    /// [`DslErrorKind::ClassUsedBeforeDeclaration`] if a pattern names a class declared later,
+    /// or [`DslErrorKind::UnknownSymbol`] otherwise.
     pub fn validate_against(&self, inventory: &Inventory) -> Result<(), DslError> {
-        for (symbol, span) in &self.symbol_refs {
-            if inventory.get(symbol).is_none() {
-                return Err(DslError::new(
-                    DslErrorKind::UnknownSymbol(symbol.clone()),
-                    *span,
-                ));
+        for symbol_ref in &self.symbol_refs {
+            if inventory.get(&symbol_ref.symbol).is_none() {
+                let kind = if symbol_ref.in_pattern && self.classes.contains_key(&symbol_ref.symbol)
+                {
+                    DslErrorKind::ClassUsedBeforeDeclaration(symbol_ref.symbol.clone())
+                } else {
+                    DslErrorKind::UnknownSymbol(symbol_ref.symbol.clone())
+                };
+                return Err(DslError::new(kind, symbol_ref.span));
             }
         }
         Ok(())
@@ -62,6 +79,10 @@ impl Program {
 }
 
 /// Parses a PhonEngine DSL source string into a validated [`Program`].
+///
+/// If the program declares at least one `segment`, its symbols are also validated against that
+/// inventory with [`Program::validate_against`]; otherwise the caller must validate them against
+/// the inventory it will use.
 ///
 /// # Errors
 ///
@@ -240,7 +261,7 @@ struct Parser {
     rules: Vec<Rule>,
     rule_ids: BTreeSet<String>,
     stages: Vec<(DialectNode, Span, Span)>,
-    symbol_refs: Vec<(String, Span)>,
+    symbol_refs: Vec<SymbolRef>,
 }
 
 impl Parser {
@@ -284,6 +305,15 @@ impl Parser {
         while matches!(self.peek_kind(), TokenKind::Newline) {
             self.advance();
         }
+    }
+
+    /// Records a literal symbol reference for [`Program::validate_against`].
+    fn record_symbol(&mut self, symbol: String, span: Span, in_pattern: bool) {
+        self.symbol_refs.push(SymbolRef {
+            symbol,
+            span,
+            in_pattern,
+        });
     }
 
     fn expect_line_end(&mut self) -> Result<(), DslError> {
@@ -405,13 +435,21 @@ impl Parser {
         } else {
             let stages = std::mem::take(&mut self.stages);
             let mut nodes = Vec::with_capacity(stages.len());
-            let mut stage_spans = BTreeMap::new();
+            let mut spans = StageSpans::default();
             let mut combined_span: Option<Span> = None;
 
             for (node, header_span, full_span) in stages {
-                stage_spans
-                    .entry(node.id().to_owned())
-                    .or_insert(header_span);
+                match spans.first.entry(node.id().to_owned()) {
+                    Entry::Vacant(slot) => {
+                        slot.insert(header_span);
+                    }
+                    Entry::Occupied(slot) => {
+                        spans
+                            .repeated
+                            .entry(slot.key().clone())
+                            .or_insert(header_span);
+                    }
+                }
                 combined_span = Some(match combined_span {
                     Some(prev) => prev.merge(full_span),
                     None => full_span,
@@ -421,19 +459,24 @@ impl Parser {
 
             let fallback_span = combined_span.unwrap_or(EOF_TOKEN.span);
             let tree = DialectTree::new(nodes).map_err(|err| {
-                let span = dialect_error_span(&err, &stage_spans, fallback_span);
+                let span = dialect_error_span(&err, &spans, fallback_span);
                 DslError::new(DslErrorKind::InvalidDialectTree(err), span)
             })?;
             Some(tree)
         };
 
-        Ok(Program {
+        let program = Program {
             inventory: std::mem::take(&mut self.inventory),
             classes: std::mem::take(&mut self.classes),
             rules: std::mem::take(&mut self.rules),
             dialect_tree,
             symbol_refs: std::mem::take(&mut self.symbol_refs),
-        })
+        };
+        // A program that declares segments carries its own inventory: validate against it.
+        if !program.inventory.is_empty() {
+            program.validate_against(&program.inventory)?;
+        }
+        Ok(program)
     }
 
     fn parse_stage_decl(&mut self) -> Result<(), DslError> {
@@ -584,7 +627,7 @@ impl Parser {
                     member_span,
                 ));
             }
-            self.symbol_refs.push((member, member_span));
+            self.record_symbol(member, member_span, false);
 
             self.skip_newlines();
             if matches!(self.peek_kind(), TokenKind::Comma) {
@@ -791,7 +834,7 @@ impl Parser {
                             tok.span,
                         ));
                     }
-                    self.symbol_refs.push((sym.clone(), tok.span));
+                    self.record_symbol(sym.clone(), tok.span, false);
                     items.push(ReplacementItem::Literal(sym));
                     combined_span = Some(match combined_span {
                         Some(prev) => prev.merge(tok.span),
@@ -882,6 +925,8 @@ impl Parser {
         let mut right = Vec::new();
         let mut saw_focus = false;
         let mut last_span = slash_span;
+        // First identifier containing `_` (e.g. `V_V`), reported if no standalone focus appears.
+        let mut focus_in_ident: Option<(String, Span)> = None;
 
         while !matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Eof)
             && !(allow_rbrace_end && matches!(self.peek_kind(), TokenKind::RBrace))
@@ -912,6 +957,12 @@ impl Parser {
                     last_span = tok.span;
                 }
                 TokenKind::Ident(_) | TokenKind::LBracket => {
+                    if let TokenKind::Ident(name) = &tok.kind
+                        && name.contains('_')
+                        && focus_in_ident.is_none()
+                    {
+                        focus_in_ident = Some((name.clone(), tok.span));
+                    }
                     let (pattern, pat_span) = self.parse_pattern()?;
                     let (elem, elem_span) = if matches!(self.peek_kind(), TokenKind::Star) {
                         let star_span = self.advance().span;
@@ -939,7 +990,12 @@ impl Parser {
         }
 
         if !saw_focus {
-            return Err(DslError::new(DslErrorKind::MissingContextFocus, last_span));
+            return Err(match focus_in_ident {
+                Some((ident, span)) => {
+                    DslError::new(DslErrorKind::FocusInsideIdentifier(ident), span)
+                }
+                None => DslError::new(DslErrorKind::MissingContextFocus, last_span),
+            });
         }
 
         Ok((left, right, last_span))
@@ -953,7 +1009,7 @@ impl Parser {
                 if let Some(class) = self.classes.get(&sym) {
                     Ok((Pattern::Class(class.clone()), tok.span))
                 } else {
-                    self.symbol_refs.push((sym.clone(), tok.span));
+                    self.record_symbol(sym.clone(), tok.span, true);
                     Ok((Pattern::Literal(sym), tok.span))
                 }
             }
@@ -1331,13 +1387,24 @@ fn parse_assigned_feature(
     }
 }
 
-fn dialect_error_span(
-    err: &DialectError,
-    stage_spans: &BTreeMap<String, Span>,
-    fallback: Span,
-) -> Span {
+/// Header spans of the `stage` declarations, used to position [`DialectError`]s.
+#[derive(Default)]
+struct StageSpans {
+    /// Header span of the first declaration of each stage id.
+    first: BTreeMap<String, Span>,
+    /// Header span of the first repeated declaration of each duplicated stage id.
+    repeated: BTreeMap<String, Span>,
+}
+
+fn dialect_error_span(err: &DialectError, spans: &StageSpans, fallback: Span) -> Span {
+    let stage_spans = &spans.first;
     match err {
-        DialectError::DuplicateStageId(id) => stage_spans.get(id).copied().unwrap_or(fallback),
+        DialectError::DuplicateStageId(id) => spans
+            .repeated
+            .get(id)
+            .or_else(|| stage_spans.get(id))
+            .copied()
+            .unwrap_or(fallback),
         DialectError::UnknownParent { stage_id, .. }
         | DialectError::DuplicateRuleId { stage_id, .. } => {
             stage_spans.get(stage_id).copied().unwrap_or(fallback)
@@ -1512,7 +1579,7 @@ mod tests {
             program.inventory.segment("t", Stress::Unstressed)?,
         ]);
         let trace = derive(&word, &program.rules, &program.inventory)?;
-        assert_eq!(trace.final_word().to_spaced(), "aː t");
+        assert_eq!(trace.final_word().to_spaced(), "ˈaː t");
         assert_eq!(trace.final_word().segments()[0].stress, Stress::Primary);
         Ok(())
     }
@@ -1782,5 +1849,67 @@ mod tests {
             })
         ));
         Ok(())
+    }
+
+    #[test]
+    fn programs_with_segments_are_validated_automatically() {
+        // A typo in a literal pattern no longer yields a rule that silently never fires.
+        assert!(matches!(
+            parse_program("segment a = [vowel]\nsegment t = [stop]\nrule r:\n  x > a / t _"),
+            Err(DslError {
+                kind: DslErrorKind::UnknownSymbol(sym),
+                span: Span { line: 4, column: 3, .. }
+            }) if sym == "x"
+        ));
+
+        // A class used before its declaration is reported as such.
+        assert!(matches!(
+            parse_program(
+                "segment a = [vowel]\nsegment t = [stop]\nsegment p = [stop, bilabial]\n\
+                 rule r:\n  t > p / W _ W\nclass W = { a }"
+            ),
+            Err(DslError {
+                kind: DslErrorKind::ClassUsedBeforeDeclaration(name),
+                span: Span { line: 5, column: 11, .. }
+            }) if name == "W"
+        ));
+
+        // Class members are symbols, never class references.
+        assert!(matches!(
+            parse_program("segment a = [vowel]\nclass V = { a }\nclass W = { V }"),
+            Err(DslError {
+                kind: DslErrorKind::UnknownSymbol(sym),
+                ..
+            }) if sym == "V"
+        ));
+
+        // Without `segment` declarations the inventory is external: no automatic validation.
+        assert!(parse_program("rule r:\n  x > a").is_ok());
+    }
+
+    #[test]
+    fn diagnostics_point_at_the_offending_declaration() {
+        // `V_V` is a single identifier: the error suggests separating the focus.
+        assert!(matches!(
+            parse_program("rule r:\n  t > p / V_V"),
+            Err(DslError {
+                kind: DslErrorKind::FocusInsideIdentifier(ident),
+                span: Span { line: 2, column: 11, .. }
+            }) if ident == "V_V"
+        ));
+        // Identifiers with `_` are fine when a standalone focus is present.
+        assert!(parse_program("class final_v = { a }\nrule r:\n  t > p / final_v _").is_ok());
+
+        // `DuplicateStageId` points at the repeated declaration, not the first one.
+        assert!(matches!(
+            parse_program("stage a {}\nstage b from a {}\nstage a from b {}"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidDialectTree(DialectError::DuplicateStageId(id)),
+                span: Span { line: 3, column: 1, .. }
+            }) if id == "a"
+        ));
+
+        // A leading UTF-8 BOM is ignored.
+        assert!(parse_program("\u{FEFF}segment a = [vowel]").is_ok());
     }
 }

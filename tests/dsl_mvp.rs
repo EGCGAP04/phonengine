@@ -2,7 +2,8 @@
 
 use phonengine::{
     ApplicationMode, Backness, ContextElement, DslError, DslErrorKind, FeatureBundle, Height,
-    Inventory, Manner, Place, Stress, apply_rule, derive, parse_program, tokenize_word,
+    Inventory, Manner, Place, Stress, TokenizeError, TokenizeErrorKind, Word, apply_rule, derive,
+    parse_program, tokenize_word,
 };
 
 const GOLDEN_MVP_TSV: &str = include_str!("fixtures/golden_mvp.tsv");
@@ -140,16 +141,26 @@ fn dsl_supports_n_to_m_rewrites_and_ipa_stress_preservation()
     // Prothesis + compensatory lengthening preserving primary stress on `a` -> `aː`
     let w1 = tokenize_word("sˈast", &program.inventory)?;
     let trace1 = derive(&w1, &program.rules, &program.inventory)?;
-    assert_eq!(trace1.final_word().to_spaced(), "e s aː t");
+    assert_eq!(trace1.final_word().to_spaced(), "e s ˈaː t");
     assert_eq!(trace1.final_word().segments()[2].stress, Stress::Primary);
     assert_eq!(trace1.fired_rule_ids(), vec!["prothesis", "lengthening"]);
+    // IPA placement before the syllable gives the same word.
+    assert_eq!(tokenize_word("ˈsast", &program.inventory)?, w1);
 
-    // Metathesis 2 -> 2 preserving stress on `t`
-    let w2 = tokenize_word("paˈrt", &program.inventory)?;
+    // `$2 $1` metathesis moves the stress with its segment. The tokenizer only stresses
+    // syllabic segments, so the stressed `r` comes from the spaced format.
+    let w2 = Word::from_spaced("p a ˈr t", &program.inventory)?;
     let trace2 = derive(&w2, &program.rules, &program.inventory)?;
-    assert_eq!(trace2.final_word().to_spaced(), "p a t r");
+    assert_eq!(trace2.final_word().to_spaced(), "p a t ˈr");
     assert_eq!(trace2.final_word().segments()[2].stress, Stress::Unstressed);
     assert_eq!(trace2.final_word().segments()[3].stress, Stress::Primary);
+    assert!(matches!(
+        tokenize_word("paˈrt", &program.inventory),
+        Err(TokenizeError {
+            kind: TokenizeErrorKind::DanglingStressMarker('ˈ'),
+            ..
+        })
+    ));
 
     // Diphthongization 1 -> 2
     let w3 = tokenize_word("pe", &program.inventory)?;

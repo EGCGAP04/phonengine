@@ -554,7 +554,7 @@ mod tests {
             inv.segment("r", Stress::Unstressed)?,
         ]);
         let diph_out = apply_rule(&stressed_e, &diphthongize, &inv)?;
-        assert_eq!(diph_out.to_spaced(), "t j e r");
+        assert_eq!(diph_out.to_spaced(), "t j ˈe r");
         assert_eq!(diph_out.segments()[1].stress, Stress::Unstressed);
         assert_eq!(diph_out.segments()[2].stress, Stress::Primary);
 
@@ -609,7 +609,7 @@ mod tests {
             inv.segment("r", Stress::Unstressed)?,
         ]);
         let out = apply_rule(&input, &metathesis, &inv)?;
-        assert_eq!(out.to_spaced(), "p r a");
+        assert_eq!(out.to_spaced(), "p r ˈa");
         assert_eq!(out.segments()[1].stress, Stress::Unstressed);
         assert_eq!(out.segments()[2].stress, Stress::Primary);
         Ok(())

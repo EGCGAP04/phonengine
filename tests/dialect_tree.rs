@@ -39,17 +39,18 @@ const HELLENIC_DSL: &str = r#"
         [+stop, +aspirated] > [-aspirated] / _ [-aspirated]* [+aspirated]
     }
 
+    // Literal rewrites keep the stress of the vowel they replace.
     stage attic "Attic Greek" from proto_greek {
       rule a_raising:
-        aː > $1[mid-high, front]
+        aː > eː
 
       rule alpha_purum "Attic alpha purum":
-        eː > $1[low, central] / r _
+        eː > aː / r _
     }
 
     stage ionic "Ionic Greek" from proto_greek {
       rule a_raising:
-        aː > $1[mid-high, front]
+        aː > eː
     }
 "#;
 
@@ -65,7 +66,8 @@ fn parses_and_derives_hellenic_dialect_tree_with_stress_and_grassmann()
         .as_ref()
         .ok_or("expected dialect tree from stage declarations")?;
 
-    // PIE *tʰeˈkʰaːs -> Proto-Greek teˈkʰaːs -> Attic teˈkʰeːs, Ionic teˈkʰeːs
+    // PIE *tʰeˈkʰaːs -> Proto-Greek teˈkʰaːs -> Attic teˈkʰeːs, Ionic teˈkʰeːs.
+    // The marker precedes the syllable `kʰaː`, so the stress falls on its nucleus `aː`.
     let input1 = tokenize_word("tʰeˈkʰaːs", &program.inventory)?;
     let full1 = tree.derive_tree(&input1, &program.inventory)?;
 
@@ -75,19 +77,20 @@ fn parses_and_derives_hellenic_dialect_tree_with_stress_and_grassmann()
             .word_at("proto_greek")
             .map(|w| w.to_spaced())
             .as_deref(),
-        Some("t e kʰ aː s")
+        Some("t e kʰ ˈaː s")
     );
     assert_eq!(
         full1.word_at("attic").map(|w| w.to_spaced()).as_deref(),
-        Some("t e kʰ eː s")
+        Some("t e kʰ ˈeː s")
     );
     assert_eq!(
         full1.word_at("ionic").map(|w| w.to_spaced()).as_deref(),
-        Some("t e kʰ eː s")
+        Some("t e kʰ ˈeː s")
     );
-    // Primary stress on `kʰ` is preserved through Proto-Greek & daughter dialects.
+    // Primary stress on the vowel survives the literal `aː > eː` in the daughter dialects.
     let attic_w1 = full1.word_at("attic").ok_or("missing attic word")?;
-    assert_eq!(attic_w1.segments()[2].stress, Stress::Primary);
+    assert_eq!(attic_w1.segments()[2].stress, Stress::Unstressed);
+    assert_eq!(attic_w1.segments()[3].stress, Stress::Primary);
 
     // PIE *serˈaː -> Proto-Greek herˈaː -> Attic herˈaː (alpha purum), Ionic herˈeː
     let input2 = tokenize_word("serˈaː", &program.inventory)?;
@@ -97,14 +100,14 @@ fn parses_and_derives_hellenic_dialect_tree_with_stress_and_grassmann()
         .into_iter()
         .map(|(k, w)| (k, w.to_spaced()))
         .collect();
-    assert_eq!(leaves2.get("attic").map(String::as_str), Some("h e r aː"));
-    assert_eq!(leaves2.get("ionic").map(String::as_str), Some("h e r eː"));
+    assert_eq!(leaves2.get("attic").map(String::as_str), Some("h e r ˈaː"));
+    assert_eq!(leaves2.get("ionic").map(String::as_str), Some("h e r ˈeː"));
     let attic_w2 = full2.word_at("attic").ok_or("missing attic word")?;
     assert_eq!(attic_w2.segments()[3].stress, Stress::Primary);
 
     // Verify `derive_stage` path and unknown stage error.
     let single = tree.derive_stage(&input2, "ionic", &program.inventory)?;
-    assert_eq!(single.final_word().to_spaced(), "h e r eː");
+    assert_eq!(single.final_word().to_spaced(), "h e r ˈeː");
     assert_eq!(
         single
             .stages()

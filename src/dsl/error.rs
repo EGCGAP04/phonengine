@@ -125,6 +125,9 @@ pub enum DslErrorKind {
     UnknownApplicationMode(String),
     /// Included `/` context separator without a `_` focus marker.
     MissingContextFocus,
+    /// Included `/` without a standalone `_`, but an identifier in the context contains `_`
+    /// (e.g. `V_V`, which lexes as a single identifier).
+    FocusInsideIdentifier(String),
     /// Included more than one `_` focus marker in a rule's context.
     DuplicateContextFocus,
     /// Declared a rule identifier more than once in the same scope.
@@ -137,6 +140,8 @@ pub enum DslErrorKind {
     InvalidRule(RuleError),
     /// Symbol referenced by a rule or class does not exist in the validated inventory.
     UnknownSymbol(String),
+    /// A pattern names a natural class that is only declared later in the program.
+    ClassUsedBeforeDeclaration(String),
 }
 
 impl fmt::Display for DslErrorKind {
@@ -194,6 +199,10 @@ impl fmt::Display for DslErrorKind {
             Self::MissingContextFocus => {
                 f.write_str("context after '/' must contain a '_' focus placeholder")
             }
+            Self::FocusInsideIdentifier(ident) => write!(
+                f,
+                "context after '/' has no standalone '_' focus placeholder; {ident:?} is a single identifier, separate the focus with spaces (e.g. 'V _ V')"
+            ),
             Self::DuplicateContextFocus => {
                 f.write_str("context after '/' must contain only one '_' focus placeholder")
             }
@@ -206,6 +215,10 @@ impl fmt::Display for DslErrorKind {
             Self::UnknownSymbol(sym) => {
                 write!(f, "symbol {sym:?} is not registered in inventory")
             }
+            Self::ClassUsedBeforeDeclaration(name) => write!(
+                f,
+                "natural class {name:?} is used before its declaration; declare it before the rules that use it"
+            ),
         }
     }
 }
@@ -348,6 +361,15 @@ mod tests {
         let plain_err = DslError::new(DslErrorKind::MissingContextFocus, span);
         assert!(!plain_err.to_string().is_empty());
         assert!(plain_err.source().is_none());
+
+        for kind in [
+            DslErrorKind::FocusInsideIdentifier("V_V".to_owned()),
+            DslErrorKind::ClassUsedBeforeDeclaration("W".to_owned()),
+        ] {
+            let err = DslError::new(kind, span);
+            assert!(err.to_string().starts_with("3:5: "));
+            assert!(err.source().is_none());
+        }
     }
 
     #[test]
