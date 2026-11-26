@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- `EngineError::UnmappedFeatureBundle` and `EngineError::UnknownSymbol` are now struct variants that carry the failing `rule_id`, and `DialectTree::derive_stage` / `derive_tree` wrap any error raised inside a stage in `EngineError::StageFailed { stage_id, source }`.
+- `RuleError::UnconstrainedInsertion` now also rejects insertions whose contexts contain only `ZeroOrMore` elements, which matched at every gap.
 - Aligned the GitHub configuration with the sibling repositories: `.gitignore` now ignores Claude Code personal config (`.claude/settings.local.json`, `CLAUDE.local.md`), and `.github/dependabot.yml` groups Cargo minor/patch updates (`cargo-minor-patch`).
 - Declared the minimum supported Rust version (`rust-version = "1.88"`) in `Cargo.toml`, required by edition 2024 let-chains.
 - Defined Milestone 3 specification in `SPEC.md`: $O(|word| \cdot |context|)$ reachability matching for `ZeroOrMore`, single-pass `LeftToRight` / `RightToLeft` directional modes, `DialectTree` / `DialectError` / `TreeDerivation`, removal of transitional `UnsupportedMode` / `UnsupportedContext` errors in favor of `UnknownStage`, and `stage` DSL syntax (`Program::dialect_tree`).
@@ -19,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- `RuleError::MisplacedWordBoundary`, `DialectError::DuplicateRuleId`, and `EngineError::StageFailed`.
 - Milestone 3 rule engine & DSL support:
   - $O(|word| \cdot |context|)$ deterministic DP/NFA reachability matching for `ContextElement::ZeroOrMore`.
   - Single-pass `ApplicationMode::LeftToRight` and `ApplicationMode::RightToLeft` rule execution for both $N \ge 1$ and $N = 0$ (epenthesis).
@@ -36,3 +39,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Removed
 
 - Transitional Milestone 1/2 errors `EngineError::UnsupportedMode` and `EngineError::UnsupportedContext`, now that `LeftToRight`, `RightToLeft`, and `ZeroOrMore` are implemented in Milestone 3.
+
+### Fixed
+
+- Literal replacements no longer drop stress: a `ReplacementItem::Literal` at position `i` inherits the stress of the matched segment at `i`, unless a `Mutate` of the same replacement already copies it.
+- A `#` that is not the outermost element of a context is rejected with `RuleError::MisplacedWordBoundary` instead of producing a rule that silently never matches.
+- `DialectTree::new` rejects duplicate rule IDs within a stage, which only the DSL used to catch.
+- Context matching no longer allocates for empty contexts, and the rustdoc of `ContextElement::ZeroOrMore` and `ApplicationMode` no longer describes them as deferred.

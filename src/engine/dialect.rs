@@ -204,6 +204,7 @@ impl DialectTree {
     /// - [`DialectError::EmptyTree`] if `nodes` is empty.
     /// - [`DialectError::EmptyStageId`] if any node has an empty or whitespace-only `id`.
     /// - [`DialectError::DuplicateStageId`] if two nodes share an `id`.
+    /// - [`DialectError::DuplicateRuleId`] if two rules of the same node share an `id`.
     /// - [`DialectError::UnknownParent`] if any node references a non-existent parent.
     /// - [`DialectError::MissingRoot`] if no node has `parent: None`.
     /// - [`DialectError::MultipleRoots`] if more than one node has `parent: None`.
@@ -220,6 +221,12 @@ impl DialectTree {
             }
             if by_id.contains_key(&node.id) {
                 return Err(DialectError::DuplicateStageId(node.id));
+            }
+            if let Some(rule_id) = first_duplicate_rule_id(&node.rules) {
+                return Err(DialectError::DuplicateRuleId {
+                    stage_id: node.id.clone(),
+                    rule_id: rule_id.to_owned(),
+                });
             }
             by_id.insert(node.id.clone(), node);
         }
@@ -339,7 +346,7 @@ impl DialectTree {
     /// # Errors
     ///
     /// - [`EngineError::UnknownStage`] if `target_stage` does not exist in this tree.
-    /// - Propagates any [`EngineError`] emitted while applying a stage's rules.
+    /// - [`EngineError::StageFailed`] wrapping any error emitted while applying a stage's rules.
     pub fn derive_stage(
         &self,
         initial: &Word,
@@ -356,7 +363,8 @@ impl DialectTree {
             let Some(node) = self.nodes.get(stage_id) else {
                 return Err(EngineError::UnknownStage(stage_id.to_owned()));
             };
-            let trace = derive(&current, &node.rules, inventory)?;
+            let trace = derive(&current, &node.rules, inventory)
+                .map_err(|err| stage_failed(stage_id, err))?;
             current = trace.final_word().clone();
             stages.push(StageTrace {
                 stage_id: node.id.clone(),
@@ -377,7 +385,7 @@ impl DialectTree {
     ///
     /// # Errors
     ///
-    /// Propagates any [`EngineError`] emitted while applying a stage's rules.
+    /// [`EngineError::StageFailed`] wrapping the first error emitted while applying a stage's rules.
     pub fn derive_tree(
         &self,
         initial: &Word,
@@ -392,7 +400,8 @@ impl DialectTree {
             let Some(node) = self.nodes.get(&stage_id) else {
                 return Err(EngineError::UnknownStage(stage_id));
             };
-            let trace = derive(&stage_input, &node.rules, inventory)?;
+            let trace = derive(&stage_input, &node.rules, inventory)
+                .map_err(|err| stage_failed(&stage_id, err))?;
             let stage_output = trace.final_word().clone();
             path.push(stage_id.clone());
 
@@ -424,6 +433,23 @@ impl DialectTree {
     }
 }
 
+/// Wraps an error raised by the rules of `stage_id` in [`EngineError::StageFailed`].
+fn stage_failed(stage_id: &str, source: EngineError) -> EngineError {
+    EngineError::StageFailed {
+        stage_id: stage_id.to_owned(),
+        source: Box::new(source),
+    }
+}
+
+/// Returns the first rule identifier that appears more than once in `rules`, if any.
+fn first_duplicate_rule_id(rules: &[Rule]) -> Option<&str> {
+    let mut seen = BTreeSet::new();
+    rules
+        .iter()
+        .map(Rule::id)
+        .find(|rule_id| !seen.insert(*rule_id))
+}
+
 fn extract_cycle(by_id: &BTreeMap<String, DialectNode>, unvisited: &BTreeSet<&str>) -> Vec<String> {
     let Some(&start) = unvisited.first() else {
         return Vec::new();
@@ -450,7 +476,7 @@ fn extract_cycle(by_id: &BTreeMap<String, DialectNode>, unvisited: &BTreeSet<&st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::{ApplicationMode, ContextElement, Pattern, ReplacementItem};
+    use crate::engine::{ApplicationMode, ContextElement, Pattern, ReplacementItem, RuleError};
     use crate::phonology::{Backness, FeatureBundle, Height, InventoryError, Manner, Place};
 
     fn greek_inventory() -> Result<Inventory, InventoryError> {
@@ -666,5 +692,88 @@ mod tests {
                 "a".to_owned(),
             ]))
         );
+    }
+
+    #[test]
+    fn dialect_tree_rejects_duplicate_rule_ids_within_a_stage() -> Result<(), RuleError> {
+        let rule = |id: &str| {
+            Rule::new(
+                id,
+                id,
+                vec![Pattern::Literal("aː".to_owned())],
+                vec![ReplacementItem::Literal("eː".to_owned())],
+                vec![],
+                vec![],
+                ApplicationMode::Simultaneous,
+            )
+        };
+        assert_eq!(
+            DialectTree::new(vec![
+                DialectNode::new("pie", "PIE", None, vec![]),
+                DialectNode::new(
+                    "attic",
+                    "Attic",
+                    Some("pie".to_owned()),
+                    vec![rule("a_raising")?, rule("other")?, rule("a_raising")?],
+                ),
+            ]),
+            Err(DialectError::DuplicateRuleId {
+                stage_id: "attic".to_owned(),
+                rule_id: "a_raising".to_owned(),
+            })
+        );
+
+        // The same rule id in two different stages is allowed.
+        let tree = DialectTree::new(vec![
+            DialectNode::new("pie", "PIE", None, vec![rule("a_raising")?]),
+            DialectNode::new(
+                "attic",
+                "Attic",
+                Some("pie".to_owned()),
+                vec![rule("a_raising")?],
+            ),
+        ]);
+        assert!(tree.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn stage_errors_are_wrapped_with_the_failing_stage_id() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let inv = greek_inventory()?;
+        let broken = Rule::new(
+            "a_backing",
+            "a > o (o is not in the inventory)",
+            vec![Pattern::Literal("a".to_owned())],
+            vec![ReplacementItem::Literal("o".to_owned())],
+            vec![],
+            vec![],
+            ApplicationMode::Simultaneous,
+        )?;
+        let tree = DialectTree::new(vec![
+            DialectNode::new("pie", "PIE", None, vec![]),
+            DialectNode::new("doric", "Doric", Some("pie".to_owned()), vec![broken]),
+        ])?;
+        let expected = Err(EngineError::StageFailed {
+            stage_id: "doric".to_owned(),
+            source: Box::new(EngineError::UnknownSymbol {
+                rule_id: "a_backing".to_owned(),
+                symbol: "o".to_owned(),
+            }),
+        });
+        let word = Word::from_spaced("t a", &inv)?;
+
+        assert_eq!(
+            tree.derive_stage(&word, "doric", &inv)
+                .map(|t| t.final_word().clone()),
+            expected.clone()
+        );
+        assert_eq!(
+            tree.derive_tree(&word, &inv).map(|t| t.initial().clone()),
+            expected
+        );
+        // Stages before the failing one still derive normally.
+        assert!(tree.derive_stage(&word, "pie", &inv).is_ok());
+        Ok(())
     }
 }

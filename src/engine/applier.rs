@@ -11,11 +11,16 @@ use super::trace::{DerivationStep, DerivationTrace};
 ///
 /// Supports [`ApplicationMode::Simultaneous`], [`ApplicationMode::LeftToRight`], and
 /// [`ApplicationMode::RightToLeft`], as well as local and non-local (`ZeroOrMore`) contexts.
+/// A [`ReplacementItem::Mutate`] keeps the stress of its source segment, and a
+/// [`ReplacementItem::Literal`] inherits the stress of the matched segment at its own position
+/// unless a `Mutate` already copies that segment.
 ///
 /// # Errors
 ///
 /// - [`EngineError::UnknownSymbol`] if a [`ReplacementItem::Literal`] symbol is missing from `inventory`.
 /// - [`EngineError::UnmappedFeatureBundle`] if a [`ReplacementItem::Mutate`] yields a bundle absent from `inventory`.
+///
+/// Both errors carry the identifier of `rule`.
 pub fn apply_rule(word: &Word, rule: &Rule, inventory: &Inventory) -> Result<Word, EngineError> {
     match rule.mode() {
         ApplicationMode::Simultaneous => apply_simultaneous(word, rule, inventory),
@@ -196,6 +201,9 @@ fn matches_target(slice: &[Segment], target: &[Pattern]) -> bool {
 }
 
 fn matches_left_context(snapshot: &[Segment], start: usize, left: &[ContextElement]) -> bool {
+    if left.is_empty() {
+        return true;
+    }
     let n = snapshot.len();
     let mut reachable = vec![false; n + 1];
     reachable[start] = true;
@@ -241,6 +249,9 @@ fn matches_left_context(snapshot: &[Segment], start: usize, left: &[ContextEleme
 }
 
 fn matches_right_context(snapshot: &[Segment], end: usize, right: &[ContextElement]) -> bool {
+    if right.is_empty() {
+        return true;
+    }
     let n = snapshot.len();
     let mut reachable = vec![false; n + 1];
     reachable[end] = true;
@@ -301,13 +312,16 @@ fn append_replacement(
     matched: &[Segment],
     inventory: &Inventory,
 ) -> Result<(), EngineError> {
-    for item in rule.replacement() {
+    let replacement = rule.replacement();
+    for (position, item) in replacement.iter().enumerate() {
         match item {
             ReplacementItem::Literal(symbol) => {
-                let seg = inventory
-                    .segment(symbol, Stress::Unstressed)
-                    .map_err(|_| EngineError::UnknownSymbol(symbol.clone()))?;
-                output.push(seg);
+                let stress = inherited_stress(replacement, matched, position);
+                let unknown_symbol = |_| EngineError::UnknownSymbol {
+                    rule_id: rule.id().to_owned(),
+                    symbol: symbol.clone(),
+                };
+                output.push(inventory.segment(symbol, stress).map_err(unknown_symbol)?);
             }
             ReplacementItem::Mutate {
                 source_index,
@@ -321,14 +335,36 @@ fn append_replacement(
                     })
                 })?;
                 let new_bundle = mutation.apply(&source.bundle);
-                let new_symbol = inventory
-                    .resolve(&new_bundle)
-                    .ok_or(EngineError::UnmappedFeatureBundle(new_bundle))?;
+                let new_symbol = inventory.resolve(&new_bundle).ok_or_else(|| {
+                    EngineError::UnmappedFeatureBundle {
+                        rule_id: rule.id().to_owned(),
+                        bundle: new_bundle,
+                    }
+                })?;
                 output.push(Segment::new(new_symbol, new_bundle, source.stress));
             }
         }
     }
     Ok(())
+}
+
+/// Returns the stress inherited by a literal at `position` of `replacement`.
+///
+/// That is the stress of `matched[position]`, unless no such segment exists (epenthesis or a
+/// longer replacement) or a [`ReplacementItem::Mutate`] of the same replacement already carries
+/// that segment's stress.
+fn inherited_stress(
+    replacement: &[ReplacementItem],
+    matched: &[Segment],
+    position: usize,
+) -> Stress {
+    let copied_by_mutation = replacement.iter().any(|item| {
+        matches!(item, ReplacementItem::Mutate { source_index, .. } if *source_index == position)
+    });
+    match matched.get(position) {
+        Some(source) if !copied_by_mutation => source.stress,
+        _ => Stress::Unstressed,
+    }
 }
 
 #[cfg(test)]
@@ -896,9 +932,10 @@ mod tests {
         let unmapped = apply_rule(&Word::from_spaced("f a", &inv)?, &voice_f, &inv);
         assert_eq!(
             unmapped,
-            Err(EngineError::UnmappedFeatureBundle(
-                FeatureBundle::consonant(Manner::Fricative, Place::Labiodental, true)
-            ))
+            Err(EngineError::UnmappedFeatureBundle {
+                rule_id: "R_UNMAPPED".to_owned(),
+                bundle: FeatureBundle::consonant(Manner::Fricative, Place::Labiodental, true),
+            })
         );
 
         let unknown_lit = Rule::new(
@@ -912,7 +949,117 @@ mod tests {
         )?;
         assert_eq!(
             apply_rule(&Word::from_spaced("a", &inv)?, &unknown_lit, &inv),
-            Err(EngineError::UnknownSymbol("z".to_owned()))
+            Err(EngineError::UnknownSymbol {
+                rule_id: "R_UNKNOWN".to_owned(),
+                symbol: "z".to_owned(),
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn literal_replacements_inherit_stress_by_position() -> Result<(), Box<dyn std::error::Error>> {
+        let inv = test_inventory()?;
+        let lit = |sym: &str| ReplacementItem::Literal(sym.to_owned());
+        let pat = |sym: &str| Pattern::Literal(sym.to_owned());
+        let copy = |source_index: usize| ReplacementItem::Mutate {
+            source_index,
+            mutation: FeatureMutation::new(),
+        };
+        let rule = |target: Vec<Pattern>, replacement: Vec<ReplacementItem>| {
+            Rule::new(
+                "R_STRESS",
+                "Stress inheritance",
+                target,
+                replacement,
+                vec![],
+                vec![],
+                ApplicationMode::Simultaneous,
+            )
+        };
+        let stresses = |word: &Word| -> Vec<(String, Stress)> {
+            word.segments()
+                .iter()
+                .map(|seg| (seg.symbol.clone(), seg.stress))
+                .collect()
+        };
+        let expect = |pairs: &[(&str, Stress)]| -> Vec<(String, Stress)> {
+            pairs.iter().map(|(s, st)| ((*s).to_owned(), *st)).collect()
+        };
+        let (u, p) = (Stress::Unstressed, Stress::Primary);
+        let p_stressed_o = Word::new(vec![inv.segment("p", u)?, inv.segment("o", p)?]);
+        let t_stressed_e_r = Word::new(vec![
+            inv.segment("t", u)?,
+            inv.segment("e", p)?,
+            inv.segment("r", u)?,
+        ]);
+        let p_stressed_a_r = Word::new(vec![
+            inv.segment("p", u)?,
+            inv.segment("a", p)?,
+            inv.segment("r", u)?,
+        ]);
+
+        // 1 -> 1: `o > u` keeps the stress of `o`.
+        let raise = rule(vec![pat("o")], vec![lit("u")])?;
+        assert_eq!(
+            stresses(&apply_rule(&p_stressed_o, &raise, &inv)?),
+            expect(&[("p", u), ("u", p)])
+        );
+
+        // 2 -> 2 literal: stress stays on its position, unlike `$2 $1` metathesis.
+        let literal_swap = rule(vec![pat("a"), pat("r")], vec![lit("r"), lit("a")])?;
+        assert_eq!(
+            stresses(&apply_rule(&p_stressed_a_r, &literal_swap, &inv)?),
+            expect(&[("p", u), ("r", p), ("a", u)])
+        );
+
+        // 1 -> 2: `e > i e` stresses position 0; `e > i $1` keeps it on the copied `e`.
+        let diph_literal = rule(vec![pat("e")], vec![lit("i"), lit("e")])?;
+        assert_eq!(
+            stresses(&apply_rule(&t_stressed_e_r, &diph_literal, &inv)?),
+            expect(&[("t", u), ("i", p), ("e", u), ("r", u)])
+        );
+        let diph_copy = rule(vec![pat("e")], vec![lit("i"), copy(0)])?;
+        assert_eq!(
+            stresses(&apply_rule(&t_stressed_e_r, &diph_copy, &inv)?),
+            expect(&[("t", u), ("i", u), ("e", p), ("r", u)])
+        );
+
+        // 2 -> 1: `a r > o` inherits the stress of the first matched segment.
+        let merge = rule(vec![pat("a"), pat("r")], vec![lit("o")])?;
+        assert_eq!(
+            stresses(&apply_rule(&p_stressed_a_r, &merge, &inv)?),
+            expect(&[("p", u), ("o", p)])
+        );
+
+        // Epenthesis has no matched segment: the inserted literal is unstressed.
+        let prothesis = Rule::new(
+            "R_PROTH_STRESS",
+            "Prothesis before p",
+            vec![],
+            vec![lit("e")],
+            vec![ContextElement::WordBoundary],
+            vec![ContextElement::Segment(pat("p"))],
+            ApplicationMode::LeftToRight,
+        )?;
+        assert_eq!(
+            stresses(&apply_rule(&p_stressed_o, &prothesis, &inv)?),
+            expect(&[("e", u), ("p", u), ("o", p)])
+        );
+
+        // Directional modes share the same replacement builder.
+        let raise_rtl = Rule::new(
+            "R_RAISE_RTL",
+            "o > u (right-to-left)",
+            vec![pat("o")],
+            vec![lit("u")],
+            vec![],
+            vec![],
+            ApplicationMode::RightToLeft,
+        )?;
+        assert_eq!(
+            stresses(&apply_rule(&p_stressed_o, &raise_rtl, &inv)?),
+            expect(&[("p", u), ("u", p)])
         );
         Ok(())
     }

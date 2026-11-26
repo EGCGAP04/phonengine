@@ -1338,7 +1338,8 @@ fn dialect_error_span(
 ) -> Span {
     match err {
         DialectError::DuplicateStageId(id) => stage_spans.get(id).copied().unwrap_or(fallback),
-        DialectError::UnknownParent { stage_id, .. } => {
+        DialectError::UnknownParent { stage_id, .. }
+        | DialectError::DuplicateRuleId { stage_id, .. } => {
             stage_spans.get(stage_id).copied().unwrap_or(fallback)
         }
         DialectError::MultipleRoots(roots) => roots
@@ -1643,6 +1644,22 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            parse_program("rule r1:\n  ∅ > e / V* _"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidRule(RuleError::UnconstrainedInsertion { .. }),
+                ..
+            })
+        ));
+        for misplaced in ["rule r1:\n  a > e / t # _", "rule r1:\n  a > e / _ # t"] {
+            assert!(matches!(
+                parse_program(misplaced),
+                Err(DslError {
+                    kind: DslErrorKind::InvalidRule(RuleError::MisplacedWordBoundary { .. }),
+                    ..
+                })
+            ));
+        }
     }
 
     #[test]
