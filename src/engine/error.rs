@@ -10,8 +10,16 @@ use crate::phonology::FeatureBundle;
 pub enum RuleError {
     /// Rule identifier is empty or whitespace-only.
     EmptyId,
-    /// Rule inserts segments (`target` is empty) with both `left_context` and `right_context` empty.
+    /// Rule inserts segments (`target` is empty) without an anchoring context: neither
+    /// `left_context` nor `right_context` contains a `WordBoundary` or a `Segment` element
+    /// (contexts made only of `ZeroOrMore` match at every gap).
     UnconstrainedInsertion {
+        /// Identifier of the invalid rule.
+        rule_id: String,
+    },
+    /// A `WordBoundary` (`#`) is not the outermost element of its context: it must be the first
+    /// element of `left_context` or the last element of `right_context`, at most once per side.
+    MisplacedWordBoundary {
         /// Identifier of the invalid rule.
         rule_id: String,
     },
@@ -33,7 +41,11 @@ impl fmt::Display for RuleError {
             Self::EmptyId => f.write_str("rule id must not be empty"),
             Self::UnconstrainedInsertion { rule_id } => write!(
                 f,
-                "rule {rule_id:?} is an unconstrained insertion: empty target requires a left or right context"
+                "rule {rule_id:?} is an unconstrained insertion: empty target requires a context with a '#' or a segment"
+            ),
+            Self::MisplacedWordBoundary { rule_id } => write!(
+                f,
+                "rule {rule_id:?} has a misplaced word boundary: '#' must be the first element of the left context or the last of the right context"
             ),
             Self::InvalidSourceIndex {
                 rule_id,
@@ -71,6 +83,13 @@ pub enum DialectError {
     MultipleRoots(Vec<String>),
     /// Parent links form a cycle that cannot be reached from the root stage.
     CycleDetected(Vec<String>),
+    /// Two rules share the same identifier within one dialect stage.
+    DuplicateRuleId {
+        /// Stage containing the duplicated rule identifier.
+        stage_id: String,
+        /// Duplicated rule identifier.
+        rule_id: String,
+    },
 }
 
 impl fmt::Display for DialectError {
@@ -101,6 +120,10 @@ impl fmt::Display for DialectError {
                     cycle.join(" -> ")
                 )
             }
+            Self::DuplicateRuleId { stage_id, rule_id } => write!(
+                f,
+                "duplicate rule id {rule_id:?} in dialect stage {stage_id:?}"
+            ),
         }
     }
 }
@@ -111,32 +134,46 @@ impl Error for DialectError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineError {
     /// A feature mutation produced a [`FeatureBundle`] absent from the [`Inventory`](crate::phonology::Inventory).
-    UnmappedFeatureBundle(FeatureBundle),
+    UnmappedFeatureBundle {
+        /// Identifier of the rule whose mutation failed.
+        rule_id: String,
+        /// Mutated bundle with no symbol in the inventory.
+        bundle: FeatureBundle,
+    },
     /// A literal replacement symbol is not registered in the [`Inventory`](crate::phonology::Inventory).
-    UnknownSymbol(String),
+    UnknownSymbol {
+        /// Identifier of the rule whose literal replacement failed.
+        rule_id: String,
+        /// Unregistered literal symbol.
+        symbol: String,
+    },
     /// Requested stage identifier does not exist in the [`DialectTree`](crate::engine::DialectTree).
     UnknownStage(String),
     /// Defensive error if rule invariants are violated during evaluation.
     InvalidRule(RuleError),
+    /// An error raised while evaluating the rules of a dialect stage.
+    StageFailed {
+        /// Identifier of the stage being evaluated.
+        stage_id: String,
+        /// Underlying error raised by the stage's rules.
+        source: Box<EngineError>,
+    },
 }
 
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnmappedFeatureBundle(bundle) => {
-                write!(
-                    f,
-                    "mutated feature bundle {bundle} is not mapped in inventory"
-                )
-            }
-            Self::UnknownSymbol(sym) => {
-                write!(
-                    f,
-                    "literal replacement symbol {sym:?} is not registered in inventory"
-                )
-            }
+            Self::UnmappedFeatureBundle { rule_id, bundle } => write!(
+                f,
+                "rule {rule_id:?}: mutated feature bundle {bundle} is not mapped in inventory"
+            ),
+            Self::UnknownSymbol { rule_id, symbol } => write!(
+                f,
+                "rule {rule_id:?}: literal replacement symbol {symbol:?} is not registered in inventory"
+            ),
             Self::UnknownStage(stage) => write!(f, "unknown dialect stage {stage:?}"),
             Self::InvalidRule(err) => write!(f, "invalid rule: {err}"),
+            Self::StageFailed { stage_id, source } => write!(f, "stage {stage_id:?}: {source}"),
         }
     }
 }
@@ -145,6 +182,7 @@ impl Error for EngineError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::InvalidRule(err) => Some(err),
+            Self::StageFailed { source, .. } => Some(source.as_ref()),
             _ => None,
         }
     }
@@ -161,6 +199,9 @@ mod tests {
             RuleError::EmptyId,
             RuleError::UnconstrainedInsertion {
                 rule_id: "R_INS".to_owned(),
+            },
+            RuleError::MisplacedWordBoundary {
+                rule_id: "R_HASH".to_owned(),
             },
             RuleError::InvalidSourceIndex {
                 rule_id: "R_IDX".to_owned(),
@@ -188,6 +229,10 @@ mod tests {
             DialectError::MissingRoot,
             DialectError::MultipleRoots(vec!["a".to_owned(), "b".to_owned()]),
             DialectError::CycleDetected(vec!["a".to_owned(), "b".to_owned(), "a".to_owned()]),
+            DialectError::DuplicateRuleId {
+                stage_id: "attic".to_owned(),
+                rule_id: "a_raising".to_owned(),
+            },
         ];
         for err in errors {
             assert!(!err.to_string().is_empty());
@@ -200,16 +245,44 @@ mod tests {
     fn engine_error_variants_implement_display_and_error() {
         let bundle = FeatureBundle::consonant(Manner::Fricative, Place::Labiodental, true);
         let errors = [
-            EngineError::UnmappedFeatureBundle(bundle),
-            EngineError::UnknownSymbol("z".to_owned()),
+            EngineError::UnmappedFeatureBundle {
+                rule_id: "R_MUT".to_owned(),
+                bundle,
+            },
+            EngineError::UnknownSymbol {
+                rule_id: "R_LIT".to_owned(),
+                symbol: "z".to_owned(),
+            },
             EngineError::UnknownStage("dorian".to_owned()),
             EngineError::InvalidRule(RuleError::EmptyId),
         ];
         for err in &errors {
             assert!(!err.to_string().is_empty());
         }
-        let wrapped = &errors[3];
-        let as_dyn: &dyn Error = wrapped;
+        assert!(errors[0].to_string().starts_with("rule \"R_MUT\": "));
+        assert!(errors[1].to_string().starts_with("rule \"R_LIT\": "));
+        let as_dyn: &dyn Error = &errors[3];
         assert!(as_dyn.source().is_some());
+    }
+
+    #[test]
+    fn stage_failed_chains_display_and_exposes_source() {
+        let inner = EngineError::UnknownSymbol {
+            rule_id: "a_raising".to_owned(),
+            symbol: "eː".to_owned(),
+        };
+        let err = EngineError::StageFailed {
+            stage_id: "attic".to_owned(),
+            source: Box::new(inner.clone()),
+        };
+        assert_eq!(
+            err.to_string(),
+            "stage \"attic\": rule \"a_raising\": literal replacement symbol \"eː\" is not registered in inventory"
+        );
+        let as_dyn: &dyn Error = &err;
+        assert_eq!(
+            as_dyn.source().map(ToString::to_string),
+            Some(inner.to_string())
+        );
     }
 }

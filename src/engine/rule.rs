@@ -63,7 +63,11 @@ impl Pattern {
 /// Single output element produced when a rule match is rewritten.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplacementItem {
-    /// Emits an unstressed segment resolved by literal symbol from the inventory.
+    /// Emits the segment registered under this symbol in the inventory.
+    ///
+    /// A literal at output position `i` inherits the stress of the matched segment at index `i`
+    /// when `i < target.len()` and no [`ReplacementItem::Mutate`] of the same replacement copies
+    /// that source index; otherwise it is unstressed.
     Literal(String),
     /// Mutates the matched input segment at `source_index` while preserving its stress.
     Mutate {
@@ -77,11 +81,11 @@ pub enum ReplacementItem {
 /// Element of a rule's left or right conditioning environment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextElement {
-    /// Word boundary (`#`).
+    /// Word boundary (`#`); only valid as the outermost element of a context.
     WordBoundary,
     /// Single segment matching `Pattern`.
     Segment(Pattern),
-    /// Non-local Kleene closure (`Pattern*`), reserved for Milestone 3.
+    /// Non-local Kleene closure (`Pattern*`): zero or more consecutive segments matching `Pattern`.
     ZeroOrMore(Pattern),
 }
 
@@ -91,9 +95,10 @@ pub enum ApplicationMode {
     /// Evaluates all non-overlapping matches against an immutable snapshot of the input word.
     #[default]
     Simultaneous,
-    /// Iterative left-to-right application (deferred to Milestone 2/3).
+    /// Single left-to-right pass that rewrites the word progressively, so earlier rewrites can
+    /// feed or bleed later matches.
     LeftToRight,
-    /// Iterative right-to-left application (deferred to Milestone 2/3).
+    /// Single right-to-left pass, the mirror image of [`ApplicationMode::LeftToRight`].
     RightToLeft,
 }
 
@@ -126,7 +131,10 @@ impl Rule {
     /// # Errors
     ///
     /// - [`RuleError::EmptyId`] if `id` is empty or whitespace-only.
-    /// - [`RuleError::UnconstrainedInsertion`] if `target`, `left_context`, and `right_context` are all empty.
+    /// - [`RuleError::UnconstrainedInsertion`] if `target` is empty and neither context contains a
+    ///   [`ContextElement::WordBoundary`] or [`ContextElement::Segment`].
+    /// - [`RuleError::MisplacedWordBoundary`] if a [`ContextElement::WordBoundary`] is not the first
+    ///   element of `left_context` or the last element of `right_context`.
     /// - [`RuleError::InvalidSourceIndex`] if any [`ReplacementItem::Mutate`] has `source_index >= target.len()`.
     pub fn new(
         id: impl Into<String>,
@@ -141,8 +149,17 @@ impl Rule {
         if id.trim().is_empty() {
             return Err(RuleError::EmptyId);
         }
-        if target.is_empty() && left_context.is_empty() && right_context.is_empty() {
+        let anchored = left_context
+            .iter()
+            .chain(&right_context)
+            .any(|elem| !matches!(elem, ContextElement::ZeroOrMore(_)));
+        if target.is_empty() && !anchored {
             return Err(RuleError::UnconstrainedInsertion { rule_id: id });
+        }
+        if !boundary_only_at(&left_context, 0)
+            || !boundary_only_at(&right_context, right_context.len().saturating_sub(1))
+        {
+            return Err(RuleError::MisplacedWordBoundary { rule_id: id });
         }
         for item in &replacement {
             if let ReplacementItem::Mutate { source_index, .. } = item
@@ -210,6 +227,14 @@ impl Rule {
     }
 }
 
+/// Returns `true` if every [`ContextElement::WordBoundary`] in `context` sits at `outer_index`.
+fn boundary_only_at(context: &[ContextElement], outer_index: usize) -> bool {
+    context
+        .iter()
+        .enumerate()
+        .all(|(idx, elem)| idx == outer_index || !matches!(elem, ContextElement::WordBoundary))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,6 +296,89 @@ mod tests {
             ApplicationMode::Simultaneous,
         )?;
         assert_eq!(right_only.id(), "R_INS_R");
+
+        // `# V*` is anchored by the boundary even though `V*` alone is not.
+        let boundary_and_closure = Rule::new(
+            "R_INS_B",
+            "Initial epenthesis across vowels",
+            vec![],
+            vec![ReplacementItem::Literal("e".to_owned())],
+            vec![
+                ContextElement::WordBoundary,
+                ContextElement::ZeroOrMore(Pattern::Literal("a".to_owned())),
+            ],
+            vec![],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(boundary_and_closure.id(), "R_INS_B");
+        Ok(())
+    }
+
+    #[test]
+    fn rule_rejects_insertion_anchored_only_by_zero_or_more() {
+        let closure = ContextElement::ZeroOrMore(Pattern::Literal("a".to_owned()));
+        let err = Rule::new(
+            "R_INS_STAR",
+            "Epenthesis after V*",
+            vec![],
+            vec![ReplacementItem::Literal("e".to_owned())],
+            vec![closure.clone()],
+            vec![closure],
+            ApplicationMode::LeftToRight,
+        );
+        assert_eq!(
+            err,
+            Err(RuleError::UnconstrainedInsertion {
+                rule_id: "R_INS_STAR".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn rule_accepts_boundaries_only_at_the_outer_edges() -> Result<(), RuleError> {
+        let t = || ContextElement::Segment(Pattern::Literal("t".to_owned()));
+        let build = |left: Vec<ContextElement>, right: Vec<ContextElement>| {
+            Rule::new(
+                "R_HASH",
+                "Boundary placement",
+                vec![Pattern::Literal("a".to_owned())],
+                vec![ReplacementItem::Literal("e".to_owned())],
+                left,
+                right,
+                ApplicationMode::Simultaneous,
+            )
+        };
+        let misplaced = Err(RuleError::MisplacedWordBoundary {
+            rule_id: "R_HASH".to_owned(),
+        });
+
+        build(
+            vec![ContextElement::WordBoundary, t()],
+            vec![t(), ContextElement::WordBoundary],
+        )?;
+        build(
+            vec![ContextElement::WordBoundary],
+            vec![ContextElement::WordBoundary],
+        )?;
+
+        // `t # _`: the boundary is not the first element of the left context.
+        assert_eq!(
+            build(vec![t(), ContextElement::WordBoundary], vec![]),
+            misplaced
+        );
+        // `_ # t`: the boundary is not the last element of the right context.
+        assert_eq!(
+            build(vec![], vec![ContextElement::WordBoundary, t()]),
+            misplaced
+        );
+        // `# # _`: at most one boundary per side.
+        assert_eq!(
+            build(
+                vec![ContextElement::WordBoundary, ContextElement::WordBoundary],
+                vec![]
+            ),
+            misplaced
+        );
         Ok(())
     }
 
