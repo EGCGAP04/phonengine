@@ -9,6 +9,11 @@ updates:
       include: "scope"
     labels:
       - "dependencies"
+    groups:
+      cargo-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
