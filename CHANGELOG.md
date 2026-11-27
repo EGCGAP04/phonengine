@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- Applied Milestone 4 review improvements in `SPEC.md` and `src/cli/`:
+  - Enriched `CliError::Io` with the failing file path or stream name (`"stdin"` / `"stdout"`), changed `CommonArgs::rules` to `PathBuf`, and changed `Command::Compare::stages` to `Option<Vec<String>>` so `--stages ""` is distinguished from omitting `--stages`.
+  - Replaced `TraceBody`/`TraceRow` with `TraceOutput::Flat` / `TraceOutput::Staged` and introduced `resolve_target` in `src/cli/mod.rs` to eliminate unreachable state branches.
+  - Clarified `Word::to_compact` round-trip conditions (stress only on syllabic segments), UTF-8 BOM stripping for word inputs, `compare` separator width, and `CliError::UnknownStage` scope in `SPEC.md`.
 - Defined Milestone 4 CLI and export formats specification in `SPEC.md` (`run`, `trace`, `compare`, `--spaced`, `Word::to_compact`, `text`/`markdown`/`json` formats with hand-written deterministic JSON serializer, `clap` as the sole external dependency, and `CliError` exit codes), advanced `AGENTS.md` to Milestone 4, and removed closed `M3` from `.github/ISSUE_TEMPLATE/*.yml`.
 - Fixed the Attic stage of the `SPEC.md` dialect-tree example, which lacked the shared `aː > eː` raising that its `r _` reversion depends on, noted the inventory it omits, listed `RuleError::EmptyId` among the rule validations, and mentioned the minimum supported Rust version in `README.md`.
 - `tokenize_word` attaches `ˈ`/`ˌ` to the next syllabic segment, as IPA writes the marker before the syllable (`tʰeˈkʰaːs` now stresses `aː`, not `kʰ`); a second marker before that segment is a `DuplicateStressMarker`, and a word with no syllabic segment after the marker is a `DanglingStressMarker`.
@@ -54,6 +58,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Stripped a leading UTF-8 BOM (`U+FEFF`) in `parse_word_lines` when reading `--words` files or `stdin`, matching the DSL lexer.
+- Trimmed trailing spaces on `compare --format text` lines when the last column has an empty outcome.
+- Expanded `src/cli/` unit tests (`TraceOutput::Staged` in `text`/`markdown`, BOM handling, `--stages ""`, `CliError::Io` path reporting) and `tests/cli.rs` end-to-end coverage (`run --stage`, `trace --stage` in `text`/`markdown`, `--spaced` in `trace`/`compare`, total deletion to `""`, BOM, zero-word inputs, special escaping, and `SpacedParse`/`Engine`/`Io` error exit codes).
 - Literal replacements no longer drop stress: a `ReplacementItem::Literal` at position `i` inherits the stress of the matched segment at `i`, unless a `Mutate` of the same replacement already copies it.
 - A `#` that is not the outermost element of a context is rejected with `RuleError::MisplacedWordBoundary` instead of producing a rule that silently never matches.
 - `DialectTree::new` rejects duplicate rule IDs within a stage, which only the DSL used to catch.

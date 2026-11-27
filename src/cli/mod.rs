@@ -5,8 +5,10 @@ pub mod error;
 pub mod format;
 
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -15,9 +17,14 @@ use phonengine::{DialectTree, Program, Word, derive, parse_program, tokenize_wor
 use args::{Cli, Command, CommonArgs};
 use error::CliError;
 use format::{
-    CompareRow, RunRow, TraceBody, TraceRow, build_stage_rows, build_step_rows, format_compare,
-    format_run, format_trace, format_word,
+    CompareRow, FlatTraceRow, RunRow, StagedTraceRow, TraceOutput, build_stage_rows,
+    build_step_rows, format_compare, format_run, format_trace, format_word,
 };
+
+enum ExecutionTarget<'a> {
+    Flat,
+    Stage(&'a DialectTree, &'a str),
+}
 
 /// Parses arguments, executes the selected command, and maps failures to exit codes.
 pub fn run() -> ExitCode {
@@ -53,7 +60,7 @@ pub fn execute<R: BufRead, W: Write>(
         | Command::Compare { common, .. } => common,
     };
 
-    if common.rules == "-" && common.words.is_empty() && common.words_file.is_none() {
+    if is_stdin_path(&common.rules) && common.words.is_empty() && common.words_file.is_none() {
         return Err(CliError::StdinConflict);
     }
 
@@ -68,10 +75,33 @@ pub fn execute<R: BufRead, W: Write>(
         Command::Trace { stage, common } => {
             trace_command(&program, stage.as_deref(), common, stdin)?
         }
-        Command::Compare { stages, common } => compare_command(&program, stages, common, stdin)?,
+        Command::Compare { stages, common } => {
+            compare_command(&program, stages.as_deref(), common, stdin)?
+        }
     };
 
     write_output(common.output.as_deref(), &rendered, stdout)
+}
+
+fn is_stdin_path(path: &Path) -> bool {
+    path.as_os_str() == OsStr::new("-")
+}
+
+fn resolve_target<'a>(
+    program: &'a Program,
+    stage: Option<&'a str>,
+) -> Result<ExecutionTarget<'a>, CliError> {
+    match (&program.dialect_tree, stage) {
+        (Some(tree), Some(stage_id)) => {
+            if tree.node(stage_id).is_none() {
+                return Err(CliError::UnknownStage(stage_id.to_owned()));
+            }
+            Ok(ExecutionTarget::Stage(tree, stage_id))
+        }
+        (Some(_), None) => Err(CliError::MissingStage),
+        (None, Some(stage_id)) => Err(CliError::UnexpectedStage(stage_id.to_owned())),
+        (None, None) => Ok(ExecutionTarget::Flat),
+    }
 }
 
 fn run_command<R: BufRead>(
@@ -80,13 +110,13 @@ fn run_command<R: BufRead>(
     common: &CommonArgs,
     stdin: &mut R,
 ) -> Result<String, CliError> {
-    validate_stage_flag(program, stage)?;
+    let target = resolve_target(program, stage)?;
     let raw_words = load_words(common, stdin)?;
     let words = parse_words(&raw_words, program, common.spaced)?;
     let mut rows = Vec::with_capacity(words.len());
 
-    match (&program.dialect_tree, stage) {
-        (Some(tree), Some(stage_id)) => {
+    match target {
+        ExecutionTarget::Stage(tree, stage_id) => {
             for (raw, word) in raw_words.iter().zip(words.iter()) {
                 let trace = tree
                     .derive_stage(word, stage_id, &program.inventory)
@@ -107,7 +137,7 @@ fn run_command<R: BufRead>(
                 });
             }
         }
-        (None, None) => {
+        ExecutionTarget::Flat => {
             for (raw, word) in raw_words.iter().zip(words.iter()) {
                 let trace = derive(word, &program.rules, &program.inventory).map_err(|source| {
                     CliError::Engine {
@@ -126,8 +156,6 @@ fn run_command<R: BufRead>(
                 });
             }
         }
-        (Some(_), None) => return Err(CliError::MissingStage),
-        (None, Some(stage_id)) => return Err(CliError::UnexpectedStage(stage_id.to_owned())),
     }
 
     Ok(format_run(stage, &rows, common.format))
@@ -139,13 +167,13 @@ fn trace_command<R: BufRead>(
     common: &CommonArgs,
     stdin: &mut R,
 ) -> Result<String, CliError> {
-    validate_stage_flag(program, stage)?;
+    let target = resolve_target(program, stage)?;
     let raw_words = load_words(common, stdin)?;
     let words = parse_words(&raw_words, program, common.spaced)?;
-    let mut rows = Vec::with_capacity(words.len());
 
-    match (&program.dialect_tree, stage) {
-        (Some(tree), Some(stage_id)) => {
+    let output = match target {
+        ExecutionTarget::Stage(tree, stage_id) => {
+            let mut rows = Vec::with_capacity(words.len());
             for (raw, word) in raw_words.iter().zip(words.iter()) {
                 let trace = tree
                     .derive_stage(word, stage_id, &program.inventory)
@@ -153,14 +181,19 @@ fn trace_command<R: BufRead>(
                         word: raw.clone(),
                         source,
                     })?;
-                rows.push(TraceRow {
+                rows.push(StagedTraceRow {
                     input: format_word(trace.initial(), common.spaced),
                     output: format_word(trace.final_word(), common.spaced),
-                    body: TraceBody::Staged(build_stage_rows(trace.stages(), common.spaced)),
+                    stages: build_stage_rows(trace.stages(), common.spaced),
                 });
             }
+            TraceOutput::Staged {
+                target_stage: stage_id.to_owned(),
+                rows,
+            }
         }
-        (None, None) => {
+        ExecutionTarget::Flat => {
+            let mut rows = Vec::with_capacity(words.len());
             for (raw, word) in raw_words.iter().zip(words.iter()) {
                 let trace = derive(word, &program.rules, &program.inventory).map_err(|source| {
                     CliError::Engine {
@@ -168,23 +201,22 @@ fn trace_command<R: BufRead>(
                         source,
                     }
                 })?;
-                rows.push(TraceRow {
+                rows.push(FlatTraceRow {
                     input: format_word(trace.initial(), common.spaced),
                     output: format_word(trace.final_word(), common.spaced),
-                    body: TraceBody::Flat(build_step_rows(trace.steps(), common.spaced)),
+                    steps: build_step_rows(trace.steps(), common.spaced),
                 });
             }
+            TraceOutput::Flat(rows)
         }
-        (Some(_), None) => return Err(CliError::MissingStage),
-        (None, Some(stage_id)) => return Err(CliError::UnexpectedStage(stage_id.to_owned())),
-    }
+    };
 
-    Ok(format_trace(stage, &rows, common.format))
+    Ok(format_trace(&output, common.format))
 }
 
 fn compare_command<R: BufRead>(
     program: &Program,
-    requested_stages: &[String],
+    requested_stages: Option<&[String]>,
     common: &CommonArgs,
     stdin: &mut R,
 ) -> Result<String, CliError> {
@@ -220,26 +252,15 @@ fn compare_command<R: BufRead>(
     Ok(format_compare(&selected_stages, &rows, common.format))
 }
 
-fn validate_stage_flag(program: &Program, stage: Option<&str>) -> Result<(), CliError> {
-    match (&program.dialect_tree, stage) {
-        (Some(tree), Some(stage_id)) => {
-            if tree.node(stage_id).is_none() {
-                return Err(CliError::UnknownStage(stage_id.to_owned()));
-            }
-            Ok(())
-        }
-        (Some(_), None) => Err(CliError::MissingStage),
-        (None, Some(stage_id)) => Err(CliError::UnexpectedStage(stage_id.to_owned())),
-        (None, None) => Ok(()),
-    }
-}
-
 fn resolve_compare_stages(
     tree: &DialectTree,
-    requested: &[String],
+    requested: Option<&[String]>,
 ) -> Result<Vec<String>, CliError> {
-    if requested.is_empty() {
+    let Some(requested) = requested else {
         return Ok(tree.leaves().into_iter().map(str::to_owned).collect());
+    };
+    if requested.is_empty() {
+        return Err(CliError::UnknownStage(String::new()));
     }
 
     let mut seen = BTreeSet::new();
@@ -256,13 +277,16 @@ fn resolve_compare_stages(
     Ok(selected)
 }
 
-fn read_rules<R: BufRead>(rules_arg: &str, stdin: &mut R) -> Result<String, CliError> {
-    if rules_arg == "-" {
+fn read_rules<R: BufRead>(rules_path: &Path, stdin: &mut R) -> Result<String, CliError> {
+    if is_stdin_path(rules_path) {
         let mut buf = String::new();
-        stdin.read_to_string(&mut buf)?;
+        stdin
+            .read_to_string(&mut buf)
+            .map_err(|err| CliError::io("stdin", err))?;
         return Ok(buf);
     }
-    Ok(fs::read_to_string(rules_arg)?)
+    fs::read_to_string(rules_path)
+        .map_err(|err| CliError::io(rules_path.display().to_string(), err))
 }
 
 fn load_words<R: BufRead>(common: &CommonArgs, stdin: &mut R) -> Result<Vec<String>, CliError> {
@@ -270,15 +294,19 @@ fn load_words<R: BufRead>(common: &CommonArgs, stdin: &mut R) -> Result<Vec<Stri
         return Ok(common.words.clone());
     }
     if let Some(path) = &common.words_file {
-        let contents = fs::read_to_string(path)?;
+        let contents = fs::read_to_string(path)
+            .map_err(|err| CliError::io(path.display().to_string(), err))?;
         return Ok(parse_word_lines(&contents));
     }
     let mut buf = String::new();
-    stdin.read_to_string(&mut buf)?;
+    stdin
+        .read_to_string(&mut buf)
+        .map_err(|err| CliError::io("stdin", err))?;
     Ok(parse_word_lines(&buf))
 }
 
 fn parse_word_lines(input: &str) -> Vec<String> {
+    let input = input.strip_prefix('\u{FEFF}').unwrap_or(input);
     input
         .lines()
         .map(str::trim)
@@ -311,14 +339,17 @@ fn parse_words(
 }
 
 fn write_output<W: Write>(
-    output_path: Option<&std::path::Path>,
+    output_path: Option<&Path>,
     rendered: &str,
     stdout: &mut W,
 ) -> Result<(), CliError> {
     if let Some(path) = output_path {
-        fs::write(path, rendered.as_bytes())?;
+        fs::write(path, rendered.as_bytes())
+            .map_err(|err| CliError::io(path.display().to_string(), err))?;
     } else {
-        stdout.write_all(rendered.as_bytes())?;
+        stdout
+            .write_all(rendered.as_bytes())
+            .map_err(|err| CliError::io("stdout", err))?;
     }
     Ok(())
 }
@@ -380,13 +411,19 @@ stage ionic "Ionic Greek" from proto_greek {
     }
 
     #[test]
-    fn parse_word_lines_skips_blank_and_comment_lines() {
-        let words = parse_word_lines("\n  # heading\n  // comment\n  vitam  \n\n  fatam\n");
+    fn parse_word_lines_strips_bom_and_skips_blank_and_comment_lines() {
+        let words = parse_word_lines("\u{FEFF}\n  # heading\n  // comment\n  vitam  \n\n  fatam\n");
         assert_eq!(words, vec!["vitam", "fatam"]);
+
+        let bom_comment = parse_word_lines("\u{FEFF}# leading comment\nvitam\n");
+        assert_eq!(bom_comment, vec!["vitam"]);
+
+        let bom_word = parse_word_lines("\u{FEFF}vitam\n");
+        assert_eq!(bom_word, vec!["vitam"]);
     }
 
     #[test]
-    fn execute_supports_stdin_rules_stdin_words_and_rejects_stdin_conflict() {
+    fn execute_supports_stdin_rules_stdin_words_and_reports_io_paths() {
         let mut stdin = Cursor::new(FLAT_DSL.as_bytes());
         let mut stdout = Vec::new();
         let cli = Cli::try_parse_from(["phonengine", "run", "-", "vitam"]).expect("valid args");
@@ -394,7 +431,7 @@ stage ionic "Ionic Greek" from proto_greek {
         assert_eq!(String::from_utf8(stdout).expect("utf8"), "vitam -> vida\n");
 
         let rules_path = write_temp_file("stdin_words.phon", FLAT_DSL);
-        let mut stdin_words = Cursor::new(b"// comment\nvitam\n\n");
+        let mut stdin_words = Cursor::new("\u{FEFF}// comment\nvitam\n\n".as_bytes());
         let mut stdout = Vec::new();
         let cli_compact =
             Cli::try_parse_from(["phonengine", "run", rules_path.to_str().expect("utf8 path")])
@@ -407,6 +444,16 @@ stage ionic "Ionic Greek" from proto_greek {
         let conflict_cli = Cli::try_parse_from(["phonengine", "run", "-"]).expect("valid args");
         let err = execute(conflict_cli, &mut empty_stdin, &mut stdout).expect_err("stdin conflict");
         assert!(matches!(err, CliError::StdinConflict));
+
+        let missing_cli =
+            Cli::try_parse_from(["phonengine", "run", "nonexistent_rules_file.phon", "vitam"])
+                .expect("valid args");
+        let missing_err =
+            execute(missing_cli, &mut Cursor::new(b""), &mut Vec::new()).expect_err("missing file");
+        assert!(matches!(
+            missing_err,
+            CliError::Io { ref path, .. } if path == "nonexistent_rules_file.phon"
+        ));
 
         let _ = fs::remove_file(rules_path);
     }
@@ -481,6 +528,20 @@ stage ionic "Ionic Greek" from proto_greek {
         assert!(matches!(
             execute(unknown_stage, &mut Cursor::new(b""), &mut stdout),
             Err(CliError::UnknownStage(ref s)) if s == "doric"
+        ));
+
+        let empty_stages_flag = Cli::try_parse_from([
+            "phonengine",
+            "compare",
+            tree_path.to_str().expect("utf8 path"),
+            "--stages",
+            "",
+            "tʰaːs",
+        ])
+        .expect("valid args");
+        assert!(matches!(
+            execute(empty_stages_flag, &mut Cursor::new(b""), &mut stdout),
+            Err(CliError::UnknownStage(ref s)) if s.is_empty()
         ));
 
         let dup_stages = Cli::try_parse_from([

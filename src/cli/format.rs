@@ -45,24 +45,40 @@ pub struct StageTraceRow {
     pub steps: Vec<StepRow>,
 }
 
-/// Body of a `trace` result: flat steps or chronological stages.
+/// Formatted row for a flat `trace` execution.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraceBody {
-    /// Flat rule program steps.
-    Flat(Vec<StepRow>),
-    /// Root-to-target stage traces in chronological order.
-    Staged(Vec<StageTraceRow>),
-}
-
-/// Formatted row for the `trace` command.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceRow {
+pub struct FlatTraceRow {
     /// Formatted initial input word.
     pub input: String,
     /// Formatted final output word.
     pub output: String,
-    /// Trace breakdown (flat steps or chronological stages).
-    pub body: TraceBody,
+    /// Non-vacuous rule steps in execution order.
+    pub steps: Vec<StepRow>,
+}
+
+/// Formatted row for a staged `trace` execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedTraceRow {
+    /// Formatted initial input word.
+    pub input: String,
+    /// Formatted final output word.
+    pub output: String,
+    /// Root-to-target stage traces in chronological order.
+    pub stages: Vec<StageTraceRow>,
+}
+
+/// Complete `trace` payload, distinguishing flat and staged programs by type.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TraceOutput {
+    /// Flat rule program trace.
+    Flat(Vec<FlatTraceRow>),
+    /// Root-to-target dialect-tree trace.
+    Staged {
+        /// Requested target stage identifier.
+        target_stage: String,
+        /// Per-word staged traces.
+        rows: Vec<StagedTraceRow>,
+    },
 }
 
 /// Formatted row for the `compare` command.
@@ -125,11 +141,11 @@ pub fn format_run(stage: Option<&str>, rows: &[RunRow], format: OutputFormat) ->
 
 /// Formats `trace` results in the requested [`OutputFormat`].
 #[must_use]
-pub fn format_trace(stage: Option<&str>, rows: &[TraceRow], format: OutputFormat) -> String {
+pub fn format_trace(output: &TraceOutput, format: OutputFormat) -> String {
     match format {
-        OutputFormat::Text => format_trace_text(stage, rows),
-        OutputFormat::Markdown => format_trace_markdown(stage, rows),
-        OutputFormat::Json => format_trace_json(stage, rows),
+        OutputFormat::Text => format_trace_text(output),
+        OutputFormat::Markdown => format_trace_markdown(output),
+        OutputFormat::Json => format_trace_json(output),
     }
 }
 
@@ -164,19 +180,19 @@ fn format_run_markdown(rows: &[RunRow]) -> String {
     out
 }
 
-fn format_trace_text(stage: Option<&str>, rows: &[TraceRow]) -> String {
+fn format_trace_text(output: &TraceOutput) -> String {
     let mut out = String::new();
-    for (idx, row) in rows.iter().enumerate() {
-        if idx > 0 {
-            out.push('\n');
-        }
-        match (&row.body, stage) {
-            (TraceBody::Flat(steps), _) => {
+    match output {
+        TraceOutput::Flat(rows) => {
+            for (idx, row) in rows.iter().enumerate() {
+                if idx > 0 {
+                    out.push('\n');
+                }
                 let _ = writeln!(out, "{} -> {}", row.input, row.output);
-                if steps.is_empty() {
+                if row.steps.is_empty() {
                     out.push_str("  (no changes)\n");
                 } else {
-                    for step in steps {
+                    for step in &row.steps {
                         let _ = writeln!(
                             out,
                             "  [{}] {}: {} -> {}",
@@ -185,13 +201,18 @@ fn format_trace_text(stage: Option<&str>, rows: &[TraceRow]) -> String {
                     }
                 }
             }
-            (TraceBody::Staged(stages), Some(target_stage)) => {
+        }
+        TraceOutput::Staged { target_stage, rows } => {
+            for (idx, row) in rows.iter().enumerate() {
+                if idx > 0 {
+                    out.push('\n');
+                }
                 let _ = writeln!(
                     out,
                     "{} -> {} (stage: {target_stage})",
                     row.input, row.output
                 );
-                for st in stages {
+                for st in &row.stages {
                     let _ = writeln!(
                         out,
                         "  stage {} ({}): {} -> {}",
@@ -210,32 +231,34 @@ fn format_trace_text(stage: Option<&str>, rows: &[TraceRow]) -> String {
                     }
                 }
             }
-            (TraceBody::Staged(_), None) => {
-                let _ = writeln!(out, "{} -> {}", row.input, row.output);
-            }
         }
     }
     out
 }
 
-fn format_trace_markdown(stage: Option<&str>, rows: &[TraceRow]) -> String {
+fn format_trace_markdown(output: &TraceOutput) -> String {
     let mut out = String::new();
-    for (idx, row) in rows.iter().enumerate() {
-        if idx > 0 {
-            out.push('\n');
-        }
-        match (&row.body, stage) {
-            (TraceBody::Flat(steps), _) => {
+    match output {
+        TraceOutput::Flat(rows) => {
+            for (idx, row) in rows.iter().enumerate() {
+                if idx > 0 {
+                    out.push('\n');
+                }
                 let _ = writeln!(out, "## {} -> {}\n", row.input, row.output);
-                append_markdown_steps(&mut out, steps);
+                append_markdown_steps(&mut out, &row.steps);
             }
-            (TraceBody::Staged(stages), Some(target_stage)) => {
+        }
+        TraceOutput::Staged { target_stage, rows } => {
+            for (idx, row) in rows.iter().enumerate() {
+                if idx > 0 {
+                    out.push('\n');
+                }
                 let _ = writeln!(
                     out,
                     "## {} -> {} (stage: {target_stage})",
                     row.input, row.output
                 );
-                for st in stages {
+                for st in &row.stages {
                     let _ = writeln!(
                         out,
                         "\n### {} — {} ({} -> {})\n",
@@ -243,9 +266,6 @@ fn format_trace_markdown(stage: Option<&str>, rows: &[TraceRow]) -> String {
                     );
                     append_markdown_steps(&mut out, &st.steps);
                 }
-            }
-            (TraceBody::Staged(_), None) => {
-                let _ = writeln!(out, "## {} -> {}\n", row.input, row.output);
             }
         }
     }
@@ -318,18 +338,21 @@ fn format_compare_text(stages: &[String], rows: &[CompareRow]) -> String {
 }
 
 fn append_aligned_row(out: &mut String, cells: &[&str], widths: &[usize]) {
+    let mut line = String::new();
     for (idx, (cell, width)) in cells.iter().zip(widths.iter()).enumerate() {
         if idx > 0 {
-            out.push_str("  ");
+            line.push_str("  ");
         }
-        out.push_str(cell);
+        line.push_str(cell);
         if idx + 1 < cells.len() {
             let char_len = cell.chars().count();
             for _ in char_len..*width {
-                out.push(' ');
+                line.push(' ');
             }
         }
     }
+    let trimmed = line.trim_end_matches(' ');
+    out.push_str(trimmed);
     out.push('\n');
 }
 
@@ -410,7 +433,14 @@ fn format_run_json(stage: Option<&str>, rows: &[RunRow]) -> String {
     out
 }
 
-fn format_trace_json(stage: Option<&str>, rows: &[TraceRow]) -> String {
+fn format_trace_json(output: &TraceOutput) -> String {
+    let (stage, is_empty) = match output {
+        TraceOutput::Flat(rows) => (None, rows.is_empty()),
+        TraceOutput::Staged { target_stage, rows } => {
+            (Some(target_stage.as_str()), rows.is_empty())
+        }
+    };
+
     let mut out = String::from("{\n");
     push_indent(&mut out, 1);
     out.push_str("\"command\": \"trace\",\n");
@@ -419,42 +449,60 @@ fn format_trace_json(stage: Option<&str>, rows: &[TraceRow]) -> String {
     push_json_opt_str(&mut out, stage);
     out.push_str(",\n");
     push_indent(&mut out, 1);
-    if rows.is_empty() {
+    if is_empty {
         out.push_str("\"results\": []\n}\n");
         return out;
     }
     out.push_str("\"results\": [\n");
-    for (idx, row) in rows.iter().enumerate() {
-        push_indent(&mut out, 2);
-        out.push_str("{\n");
-        push_indent(&mut out, 3);
-        out.push_str("\"input\": ");
-        push_json_str(&mut out, &row.input);
-        out.push_str(",\n");
-        push_indent(&mut out, 3);
-        out.push_str("\"output\": ");
-        push_json_str(&mut out, &row.output);
-        out.push_str(",\n");
-        match &row.body {
-            TraceBody::Flat(steps) => {
+    match output {
+        TraceOutput::Flat(rows) => {
+            for (idx, row) in rows.iter().enumerate() {
+                push_indent(&mut out, 2);
+                out.push_str("{\n");
+                push_indent(&mut out, 3);
+                out.push_str("\"input\": ");
+                push_json_str(&mut out, &row.input);
+                out.push_str(",\n");
+                push_indent(&mut out, 3);
+                out.push_str("\"output\": ");
+                push_json_str(&mut out, &row.output);
+                out.push_str(",\n");
                 push_indent(&mut out, 3);
                 out.push_str("\"steps\": ");
-                push_json_steps(&mut out, steps, 3);
+                push_json_steps(&mut out, &row.steps, 3);
+                out.push('\n');
+                push_indent(&mut out, 2);
+                out.push('}');
+                if idx + 1 < rows.len() {
+                    out.push(',');
+                }
                 out.push('\n');
             }
-            TraceBody::Staged(stages) => {
+        }
+        TraceOutput::Staged { rows, .. } => {
+            for (idx, row) in rows.iter().enumerate() {
+                push_indent(&mut out, 2);
+                out.push_str("{\n");
+                push_indent(&mut out, 3);
+                out.push_str("\"input\": ");
+                push_json_str(&mut out, &row.input);
+                out.push_str(",\n");
+                push_indent(&mut out, 3);
+                out.push_str("\"output\": ");
+                push_json_str(&mut out, &row.output);
+                out.push_str(",\n");
                 push_indent(&mut out, 3);
                 out.push_str("\"stages\": ");
-                push_json_stages(&mut out, stages, 3);
+                push_json_stages(&mut out, &row.stages, 3);
+                out.push('\n');
+                push_indent(&mut out, 2);
+                out.push('}');
+                if idx + 1 < rows.len() {
+                    out.push(',');
+                }
                 out.push('\n');
             }
         }
-        push_indent(&mut out, 2);
-        out.push('}');
-        if idx + 1 < rows.len() {
-            out.push(',');
-        }
-        out.push('\n');
     }
     push_indent(&mut out, 1);
     out.push_str("]\n}\n");
@@ -657,6 +705,14 @@ mod tests {
             "vitam -> vida\n"
         );
         assert_eq!(format_run(None, &[], OutputFormat::Text), "");
+        assert_eq!(
+            format_run(None, &[], OutputFormat::Markdown),
+            "| Input | Output |\n| --- | --- |\n"
+        );
+        assert_eq!(
+            format_run(None, &[], OutputFormat::Json),
+            "{\n  \"command\": \"run\",\n  \"stage\": null,\n  \"results\": []\n}\n"
+        );
 
         assert_eq!(
             format_run(None, &rows, OutputFormat::Markdown),
@@ -681,26 +737,26 @@ mod tests {
 
     #[test]
     fn formats_flat_and_staged_traces_across_all_formats() {
-        let flat_rows = vec![
-            TraceRow {
+        let flat = TraceOutput::Flat(vec![
+            FlatTraceRow {
                 input: "vitam".to_owned(),
                 output: "vida".to_owned(),
-                body: TraceBody::Flat(vec![StepRow {
+                steps: vec![StepRow {
                     rule_id: "R1".to_owned(),
                     rule_name: "Final -m deletion".to_owned(),
                     before: "vitam".to_owned(),
                     after: "vita".to_owned(),
-                }]),
+                }],
             },
-            TraceRow {
+            FlatTraceRow {
                 input: "sala".to_owned(),
                 output: "sala".to_owned(),
-                body: TraceBody::Flat(Vec::new()),
+                steps: Vec::new(),
             },
-        ];
+        ]);
 
         assert_eq!(
-            format_trace(None, &flat_rows, OutputFormat::Text),
+            format_trace(&flat, OutputFormat::Text),
             concat!(
                 "vitam -> vida\n",
                 "  [R1] Final -m deletion: vitam -> vita\n",
@@ -710,7 +766,7 @@ mod tests {
             )
         );
         assert_eq!(
-            format_trace(None, &flat_rows, OutputFormat::Markdown),
+            format_trace(&flat, OutputFormat::Markdown),
             concat!(
                 "## vitam -> vida\n\n",
                 "| Rule ID | Rule | Before | After |\n",
@@ -722,34 +778,88 @@ mod tests {
             )
         );
 
-        let staged_rows = vec![TraceRow {
-            input: "tʰeːs".to_owned(),
-            output: "tʰeːs".to_owned(),
-            body: TraceBody::Staged(vec![StageTraceRow {
-                stage_id: "pie".to_owned(),
-                stage_name: "Proto-Indo-European".to_owned(),
-                input: "tʰeːs".to_owned(),
+        let staged = TraceOutput::Staged {
+            target_stage: "attic".to_owned(),
+            rows: vec![StagedTraceRow {
+                input: "tʰaːs".to_owned(),
                 output: "tʰeːs".to_owned(),
-                steps: Vec::new(),
-            }]),
-        }];
+                stages: vec![
+                    StageTraceRow {
+                        stage_id: "pie".to_owned(),
+                        stage_name: "Proto-Indo-European".to_owned(),
+                        input: "tʰaːs".to_owned(),
+                        output: "tʰaːs".to_owned(),
+                        steps: Vec::new(),
+                    },
+                    StageTraceRow {
+                        stage_id: "attic".to_owned(),
+                        stage_name: "Attic Greek".to_owned(),
+                        input: "tʰaːs".to_owned(),
+                        output: "tʰeːs".to_owned(),
+                        steps: vec![StepRow {
+                            rule_id: "a_raising".to_owned(),
+                            rule_name: "a_raising".to_owned(),
+                            before: "tʰaːs".to_owned(),
+                            after: "tʰeːs".to_owned(),
+                        }],
+                    },
+                ],
+            }],
+        };
+
         assert_eq!(
-            format_trace(Some("attic"), &staged_rows, OutputFormat::Json),
+            format_trace(&staged, OutputFormat::Text),
+            concat!(
+                "tʰaːs -> tʰeːs (stage: attic)\n",
+                "  stage pie (Proto-Indo-European): tʰaːs -> tʰaːs\n",
+                "    (no changes)\n",
+                "  stage attic (Attic Greek): tʰaːs -> tʰeːs\n",
+                "    [a_raising] a_raising: tʰaːs -> tʰeːs\n",
+            )
+        );
+        assert_eq!(
+            format_trace(&staged, OutputFormat::Markdown),
+            concat!(
+                "## tʰaːs -> tʰeːs (stage: attic)\n\n",
+                "### pie — Proto-Indo-European (tʰaːs -> tʰaːs)\n\n",
+                "_No changes._\n\n",
+                "### attic — Attic Greek (tʰaːs -> tʰeːs)\n\n",
+                "| Rule ID | Rule | Before | After |\n",
+                "| --- | --- | --- | --- |\n",
+                "| a_raising | a_raising | tʰaːs | tʰeːs |\n",
+            )
+        );
+        assert_eq!(
+            format_trace(&staged, OutputFormat::Json),
             concat!(
                 "{\n",
                 "  \"command\": \"trace\",\n",
                 "  \"stage\": \"attic\",\n",
                 "  \"results\": [\n",
                 "    {\n",
-                "      \"input\": \"tʰeːs\",\n",
+                "      \"input\": \"tʰaːs\",\n",
                 "      \"output\": \"tʰeːs\",\n",
                 "      \"stages\": [\n",
                 "        {\n",
                 "          \"stage_id\": \"pie\",\n",
                 "          \"stage_name\": \"Proto-Indo-European\",\n",
-                "          \"input\": \"tʰeːs\",\n",
-                "          \"output\": \"tʰeːs\",\n",
+                "          \"input\": \"tʰaːs\",\n",
+                "          \"output\": \"tʰaːs\",\n",
                 "          \"steps\": []\n",
+                "        },\n",
+                "        {\n",
+                "          \"stage_id\": \"attic\",\n",
+                "          \"stage_name\": \"Attic Greek\",\n",
+                "          \"input\": \"tʰaːs\",\n",
+                "          \"output\": \"tʰeːs\",\n",
+                "          \"steps\": [\n",
+                "            {\n",
+                "              \"rule_id\": \"a_raising\",\n",
+                "              \"rule_name\": \"a_raising\",\n",
+                "              \"before\": \"tʰaːs\",\n",
+                "              \"after\": \"tʰeːs\"\n",
+                "            }\n",
+                "          ]\n",
                 "        }\n",
                 "      ]\n",
                 "    }\n",
@@ -757,31 +867,60 @@ mod tests {
                 "}\n",
             )
         );
+
+        let empty_flat = TraceOutput::Flat(Vec::new());
+        assert_eq!(format_trace(&empty_flat, OutputFormat::Text), "");
+        assert_eq!(format_trace(&empty_flat, OutputFormat::Markdown), "");
+        assert_eq!(
+            format_trace(&empty_flat, OutputFormat::Json),
+            "{\n  \"command\": \"trace\",\n  \"stage\": null,\n  \"results\": []\n}\n"
+        );
     }
 
     #[test]
-    fn formats_compare_and_escapes_markdown_pipes() {
+    fn formats_compare_trims_trailing_spaces_on_empty_outcomes_and_escapes_pipes() {
         let stages = vec!["attic".to_owned(), "ionic".to_owned()];
-        let rows = vec![CompareRow {
-            input: "maːtʰeːs".to_owned(),
-            outcomes: vec!["meːtʰeːs".to_owned(), "meːtʰeːs".to_owned()],
-        }];
+        let rows = vec![
+            CompareRow {
+                input: "maːtʰeːs".to_owned(),
+                outcomes: vec!["meːtʰeːs".to_owned(), "meːtʰeːs".to_owned()],
+            },
+            CompareRow {
+                input: "m".to_owned(),
+                outcomes: vec!["m".to_owned(), String::new()],
+            },
+        ];
 
         assert_eq!(format_compare(&stages, &[], OutputFormat::Text), "");
         assert_eq!(
-            format_compare(&stages, &rows, OutputFormat::Text),
+            format_compare(&stages, &[], OutputFormat::Markdown),
+            "| Input | attic | ionic |\n| --- | --- | --- |\n"
+        );
+        assert_eq!(
+            format_compare(&stages, &[], OutputFormat::Json),
+            "{\n  \"command\": \"compare\",\n  \"stages\": [\"attic\", \"ionic\"],\n  \"results\": []\n}\n"
+        );
+
+        let compare_text = format_compare(&stages, &rows, OutputFormat::Text);
+        assert_eq!(
+            compare_text,
             concat!(
                 "Input     attic     ionic\n",
                 "--------  --------  --------\n",
                 "maːtʰeːs  meːtʰeːs  meːtʰeːs\n",
+                "m         m\n",
             )
         );
+        for line in compare_text.lines() {
+            assert!(!line.ends_with(' '), "trailing space on line: {line:?}");
+        }
+
         assert_eq!(
-            format_compare(&stages, &rows, OutputFormat::Markdown),
+            format_compare(&stages, &rows[..1], OutputFormat::Markdown),
             "| Input | attic | ionic |\n| --- | --- | --- |\n| maːtʰeːs | meːtʰeːs | meːtʰeːs |\n"
         );
         assert_eq!(
-            format_compare(&stages, &rows, OutputFormat::Json),
+            format_compare(&stages, &rows[..1], OutputFormat::Json),
             concat!(
                 "{\n",
                 "  \"command\": \"compare\",\n",

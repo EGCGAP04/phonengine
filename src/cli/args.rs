@@ -32,7 +32,7 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct CommonArgs {
     /// Path to the DSL rules file (or '-' to read rules from stdin).
-    pub rules: String,
+    pub rules: PathBuf,
 
     /// Input words to derive (mutually exclusive with --words).
     #[arg(conflicts_with = "words_file")]
@@ -84,7 +84,7 @@ pub enum Command {
     Compare {
         /// Comma-separated or repeated stage IDs to compare (defaults to all leaves).
         #[arg(long = "stages", value_name = "STAGE_ID", value_delimiter = ',')]
-        stages: Vec<String>,
+        stages: Option<Vec<String>>,
 
         /// Common rule, input, and export options.
         #[command(flatten)]
@@ -115,7 +115,7 @@ mod tests {
             Command::Run {
                 stage: None,
                 common: CommonArgs {
-                    rules: "latin.phon".to_owned(),
+                    rules: PathBuf::from("latin.phon"),
                     words: vec!["v i t a m".to_owned(), "f a t a m".to_owned()],
                     words_file: None,
                     spaced: true,
@@ -141,11 +141,27 @@ mod tests {
             Command::Trace {
                 stage: Some("attic".to_owned()),
                 common: CommonArgs {
-                    rules: "-".to_owned(),
+                    rules: PathBuf::from("-"),
                     words: Vec::new(),
                     words_file: Some(PathBuf::from("words.txt")),
                     spaced: false,
                     format: OutputFormat::Markdown,
+                    output: None,
+                },
+            }
+        );
+
+        let compare_default = Cli::try_parse_from(["phonengine", "compare", "greek.phon"])?;
+        assert_eq!(
+            compare_default.command,
+            Command::Compare {
+                stages: None,
+                common: CommonArgs {
+                    rules: PathBuf::from("greek.phon"),
+                    words: Vec::new(),
+                    words_file: None,
+                    spaced: false,
+                    format: OutputFormat::Text,
                     output: None,
                 },
             }
@@ -164,14 +180,31 @@ mod tests {
         assert_eq!(
             compare.command,
             Command::Compare {
-                stages: vec![
+                stages: Some(vec![
                     "attic".to_owned(),
                     "ionic".to_owned(),
                     "proto_greek".to_owned(),
-                ],
+                ]),
                 common: CommonArgs {
-                    rules: "greek.phon".to_owned(),
+                    rules: PathBuf::from("greek.phon"),
                     words: vec!["tʰeːs".to_owned()],
+                    words_file: None,
+                    spaced: false,
+                    format: OutputFormat::Text,
+                    output: None,
+                },
+            }
+        );
+
+        let compare_empty_flag =
+            Cli::try_parse_from(["phonengine", "compare", "greek.phon", "--stages", ""])?;
+        assert_eq!(
+            compare_empty_flag.command,
+            Command::Compare {
+                stages: Some(vec![String::new()]),
+                common: CommonArgs {
+                    rules: PathBuf::from("greek.phon"),
+                    words: Vec::new(),
                     words_file: None,
                     spaced: false,
                     format: OutputFormat::Text,
