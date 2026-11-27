@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Milestone 5 specification in `SPEC.md` defining stress-aware rule patterns and mutations (`StressMatch`, `StressUpdate`, `LiteralStress`), alpha feature assimilation/dissimilation variables (`FeatureDomain`, `FeatureField`, `VarPolarity`, `FeatureVar`, `FeatureVarValue`, `VarBindings`), multi-context `|` environments, optional `(X)` context elements, and planned `examples/` historical grammars.
+- Opened GitHub milestones `M5: Phonological expressiveness` and `M6: Comparative reconstruction`, and added both to `.github/ISSUE_TEMPLATE/*.yml`, `AGENTS.md`, and `README.md`.
+
+### Changed
+
+- Minor post-`v0.1.0` documentation wording cleanups in `README.md` and `SPEC.md`.
+
 ## [0.1.0] - 2026-11-27
 
 First release of PhonEngine: deterministic phonological evolution and comparative reconstruction library and CLI in Rust (Milestones 0–4).

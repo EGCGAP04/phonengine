@@ -31,7 +31,10 @@
 - **Issues, etiquetas, milestones y proyecto**:
   - Formularios en `.github/ISSUE_TEMPLATE/` (`feature`, `bug`, `chore`, `docs`, `refactor`; issues en blanco deshabilitados). Al usar `gh issue create --body-file`, replicá las secciones del formulario. Al crear o cerrar una milestone, actualizá el desplegable de milestone en los cinco formularios.
   - Cada Issue y PR va asignado a `EGCGAP04` (`--assignee @me`), con etiquetas de tipo (`feature`, `bug`, `chore`, `documentation`, `refactor`, `blocked`) y área (`phonology`, `engine`, `dsl`, `cli`), milestone activa y en el proyecto [#8 `phonengine`](https://github.com/users/EGCGAP04/projects/8) (`In Progress` al arrancar, `Done` al cerrar/mergear).
-  - Milestones abiertas: ninguna por ahora (`M0`–`M4` completadas con `v0.1.0`). Cuando se abra una nueva milestone, agregala acá y en los formularios de `.github/ISSUE_TEMPLATE/`. Las cierra Enzo (o el agente cuando Enzo lo pida).
+  - Milestones abiertas:
+    - `M5: Phonological expressiveness` (activa)
+    - `M6: Comparative reconstruction` (planificada)
+    (`M0`–`M4` completadas con `v0.1.0`). Cuando se abra o cierre una milestone, actualizá esta lista y los formularios de `.github/ISSUE_TEMPLATE/`. Las cierra Enzo (o el agente cuando Enzo lo pida).
 - **Merge**: solo cuando Enzo lo pide para ese PR. Verificá antes que esté `MERGEABLE` y que pasen los checks, luego ejecutá `gh pr merge <N> --squash --match-head-commit <SHA completo>`.
 
 ## Convenciones de Rust e idioma

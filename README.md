@@ -8,7 +8,7 @@ Deterministic phonological evolution and comparative reconstruction engine writt
 - **General N -> M rules**: supports deletion (`1 -> 0`), epenthesis (`0 -> 1`), diphthongization (`1 -> 2`), compensatory lengthening (`2 -> 1`), and metathesis (`2 -> 2`).
 - **Noise-free traceability**: every derivation produces an immutable `DerivationTrace` recording only steps where the word actually changed.
 - **Strict determinism**: core structures and serialization rely exclusively on `BTreeMap`, `BTreeSet`, and `Vec` (never `HashMap` or `HashSet`).
-- **`std`-only core**: `phonology`, `engine`, and `dsl` depend solely on the Rust standard library. External crates are deferred to the CLI (`clap`) in Milestone 4.
+- **`std`-only core**: `phonology`, `engine`, and `dsl` depend solely on the Rust standard library. External crates are restricted to `clap` in the CLI (`src/cli/`).
 
 See [`SPEC.md`](SPEC.md) for the full technical specification.
 
@@ -107,6 +107,8 @@ cargo run -- compare greek.phon --stages attic,ionic pʰˈaːtʰi
 - [x] **M2**: DSL lexer/parser (`src/dsl/`) and maximal-munch tokenizer.
 - [x] **M3**: Dialect trees, chronological stages, directional modes, and non-local contexts.
 - [x] **M4**: CLI (`src/cli/`) with `clap` and Markdown/JSON export.
+- [ ] **M5**: Phonological expressiveness (stress-aware rules, alpha feature variables, multi-context/optional environments, and historical grammar examples).
+- [ ] **M6**: Comparative reconstruction (feature-based cognate alignment, sound correspondence tables, and proto-form verification).
 
 ## License
 
