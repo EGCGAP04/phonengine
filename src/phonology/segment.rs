@@ -116,9 +116,9 @@ impl Word {
     /// Formats the word by concatenating segment symbols without spaces, prefixing stressed
     /// segments with their IPA marker (`ˈ` primary, `ˌ` secondary), e.g. `tekʰˈeːs`.
     ///
-    /// When no stress marker is registered as an inventory symbol and the inventory has no
-    /// maximal-munch ambiguity, [`crate::dsl::tokenize_word`] reads the output back into an equal
-    /// word.
+    /// When stress is carried only on syllabic segments (`bundle.syllabic == true`), no stress
+    /// marker is registered as an inventory symbol, and the inventory has no maximal-munch
+    /// ambiguity, [`crate::dsl::tokenize_word`] reads the output back into an equal word.
     #[must_use]
     pub fn to_compact(&self) -> String {
         let mut out = String::new();

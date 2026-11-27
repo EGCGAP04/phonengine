@@ -480,11 +480,28 @@ fn cli_reports_expected_exit_codes_for_clap_and_runtime_errors() {
     assert_eq!(unknown_flag.status.code(), Some(2));
 
     // Runtime errors -> exit code 1 + "error: ..." on stderr
+    let missing_rules = dir.path().join("does_not_exist.phon");
+    let missing_words = dir.path().join("missing_words.txt");
+    let unwritable_out = dir.path().join("no_such_dir").join("out.txt");
+    let unmapped_dsl_path = dir.write_file(
+        "unmapped.phon",
+        "segment f = [fricative, labiodental, -voiced]\nrule r1:\n  f > [+voiced]\n",
+    );
+    let missing_rules_s = missing_rules.to_str().expect("utf8 path");
+    let missing_words_s = missing_words.to_str().expect("utf8 path");
+    let unwritable_out_s = unwritable_out.to_str().expect("utf8 path");
+    let unmapped_dsl_s = unmapped_dsl_path.to_str().expect("utf8 path");
+
     let cases: &[(&[&str], Option<&str>, &str)] = &[
         (&["run", empty_inv, "a"], None, "segment"),
         (&["run", bad_dsl, "a"], None, "DSL error"),
         (&["run", tree, "pʰˈaːtʰi"], None, "--stage"),
         (&["run", flat, "--stage", "attic", "vitam"], None, "--stage"),
+        (
+            &["run", tree, "--stage", "doric", "pʰˈaːtʰi"],
+            None,
+            "unknown stage",
+        ),
         (&["compare", flat, "vitam"], None, "stage"),
         (
             &["compare", tree, "--stages", "attic,attic", "pʰˈaːtʰi"],
@@ -496,8 +513,30 @@ fn cli_reports_expected_exit_codes_for_clap_and_runtime_errors() {
             None,
             "unknown stage",
         ),
+        (
+            &["compare", tree, "--stages", "", "pʰˈaːtʰi"],
+            None,
+            "unknown stage",
+        ),
         (&["run", "-"], Some(MVP_DSL), "stdin"),
         (&["run", flat, "xyz"], None, "tokenize"),
+        (&["run", flat, "--spaced", "v x"], None, "spaced"),
+        (&["run", unmapped_dsl_s, "f"], None, "derivation failed"),
+        (
+            &["run", missing_rules_s, "vitam"],
+            None,
+            "does_not_exist.phon",
+        ),
+        (
+            &["run", flat, "--words", missing_words_s],
+            None,
+            "missing_words.txt",
+        ),
+        (
+            &["run", flat, "-o", unwritable_out_s, "vitam"],
+            None,
+            "no_such_dir",
+        ),
     ];
 
     for (args, stdin_data, expected_substr) in cases {
@@ -514,4 +553,324 @@ fn cli_reports_expected_exit_codes_for_clap_and_runtime_errors() {
             "unexpected stderr for {args:?}: {err}"
         );
     }
+}
+
+#[test]
+fn run_and_trace_support_staged_text_markdown_json_and_spaced_modes() {
+    let dir = TempDir::new("staged_modes");
+    let tree_path = dir.write_file("greek.phon", HELLENIC_DSL);
+    let tree = tree_path.to_str().expect("utf8 path");
+
+    // `run --stage attic` across text, markdown, and json.
+    let run_text = run_cli(&["run", tree, "--stage", "attic", "pʰˈaːtʰi"], None);
+    assert!(
+        run_text.status.success(),
+        "stderr: {}",
+        stderr_str(&run_text)
+    );
+    assert_eq!(stdout_str(&run_text), "pʰˈaːtʰi -> pˈeːtʰi\n");
+
+    let run_md = run_cli(
+        &[
+            "run",
+            tree,
+            "--stage",
+            "attic",
+            "-f",
+            "markdown",
+            "pʰˈaːtʰi",
+        ],
+        None,
+    );
+    assert!(run_md.status.success(), "stderr: {}", stderr_str(&run_md));
+    assert_eq!(
+        stdout_str(&run_md),
+        "| Input | Output |\n| --- | --- |\n| pʰˈaːtʰi | pˈeːtʰi |\n"
+    );
+
+    let run_json = run_cli(
+        &["run", tree, "--stage", "attic", "-f", "json", "pʰˈaːtʰi"],
+        None,
+    );
+    assert!(
+        run_json.status.success(),
+        "stderr: {}",
+        stderr_str(&run_json)
+    );
+    assert_eq!(
+        stdout_str(&run_json),
+        concat!(
+            "{\n",
+            "  \"command\": \"run\",\n",
+            "  \"stage\": \"attic\",\n",
+            "  \"results\": [\n",
+            "    {\n",
+            "      \"input\": \"pʰˈaːtʰi\",\n",
+            "      \"output\": \"pˈeːtʰi\",\n",
+            "      \"rules_fired\": [\"grassmann\", \"a_raising\"]\n",
+            "    }\n",
+            "  ]\n",
+            "}\n",
+        )
+    );
+
+    // `trace --stage attic` in text and markdown (including `--spaced`).
+    let trace_text = run_cli(
+        &["trace", tree, "--stage", "attic", "--spaced", "pʰ ˈaː tʰ i"],
+        None,
+    );
+    assert!(
+        trace_text.status.success(),
+        "stderr: {}",
+        stderr_str(&trace_text)
+    );
+    assert_eq!(
+        stdout_str(&trace_text),
+        concat!(
+            "pʰ ˈaː tʰ i -> p ˈeː tʰ i (stage: attic)\n",
+            "  stage pie (Proto-Indo-European): pʰ ˈaː tʰ i -> pʰ ˈaː tʰ i\n",
+            "    (no changes)\n",
+            "  stage proto_greek (Proto-Greek): pʰ ˈaː tʰ i -> p ˈaː tʰ i\n",
+            "    [grassmann] grassmann: pʰ ˈaː tʰ i -> p ˈaː tʰ i\n",
+            "  stage attic (Attic Greek): p ˈaː tʰ i -> p ˈeː tʰ i\n",
+            "    [a_raising] a_raising: p ˈaː tʰ i -> p ˈeː tʰ i\n",
+        )
+    );
+
+    let trace_md = run_cli(
+        &[
+            "trace",
+            tree,
+            "--stage",
+            "attic",
+            "-f",
+            "markdown",
+            "pʰˈaːtʰi",
+        ],
+        None,
+    );
+    assert!(
+        trace_md.status.success(),
+        "stderr: {}",
+        stderr_str(&trace_md)
+    );
+    assert_eq!(
+        stdout_str(&trace_md),
+        concat!(
+            "## pʰˈaːtʰi -> pˈeːtʰi (stage: attic)\n\n",
+            "### pie — Proto-Indo-European (pʰˈaːtʰi -> pʰˈaːtʰi)\n\n",
+            "_No changes._\n\n",
+            "### proto_greek — Proto-Greek (pʰˈaːtʰi -> pˈaːtʰi)\n\n",
+            "| Rule ID | Rule | Before | After |\n",
+            "| --- | --- | --- | --- |\n",
+            "| grassmann | grassmann | pʰˈaːtʰi | pˈaːtʰi |\n\n",
+            "### attic — Attic Greek (pˈaːtʰi -> pˈeːtʰi)\n\n",
+            "| Rule ID | Rule | Before | After |\n",
+            "| --- | --- | --- | --- |\n",
+            "| a_raising | a_raising | pˈaːtʰi | pˈeːtʰi |\n",
+        )
+    );
+
+    // `compare --spaced` and repeated `--stages`.
+    let compare_spaced = run_cli(
+        &[
+            "compare",
+            tree,
+            "--spaced",
+            "--stages",
+            "ionic",
+            "--stages",
+            "attic",
+            "s r ˈaː tʰ i",
+        ],
+        None,
+    );
+    assert!(
+        compare_spaced.status.success(),
+        "stderr: {}",
+        stderr_str(&compare_spaced)
+    );
+    assert_eq!(
+        stdout_str(&compare_spaced),
+        concat!(
+            "Input         ionic         attic\n",
+            "------------  ------------  ------------\n",
+            "s r ˈaː tʰ i  s r ˈeː tʰ i  s r ˈaː tʰ i\n",
+        )
+    );
+}
+
+#[test]
+fn cli_handles_bom_zero_words_empty_deletion_and_special_escaping() {
+    let dir = TempDir::new("edge_cases");
+
+    // 1. UTF-8 BOM in `--words` (before comment and before word) and `stdin`.
+    let mvp_path = dir.write_file("mvp.phon", MVP_DSL);
+    let mvp = mvp_path.to_str().expect("utf8 path");
+    let bom_words = dir.write_file("bom_words.txt", "\u{FEFF}# comment\nvitam\n");
+    let bom_words_err = dir.write_file("bom_first.txt", "\u{FEFF}vitam\n");
+
+    let bom_comment_out = run_cli(
+        &[
+            "run",
+            mvp,
+            "--words",
+            bom_words.to_str().expect("utf8 path"),
+        ],
+        None,
+    );
+    assert!(
+        bom_comment_out.status.success(),
+        "stderr: {}",
+        stderr_str(&bom_comment_out)
+    );
+    assert_eq!(stdout_str(&bom_comment_out), "vitam -> vida\n");
+
+    let bom_first_out = run_cli(
+        &[
+            "run",
+            mvp,
+            "--words",
+            bom_words_err.to_str().expect("utf8 path"),
+        ],
+        None,
+    );
+    assert!(
+        bom_first_out.status.success(),
+        "stderr: {}",
+        stderr_str(&bom_first_out)
+    );
+    assert_eq!(stdout_str(&bom_first_out), "vitam -> vida\n");
+
+    let bom_stdin_out = run_cli(&["run", mvp], Some("\u{FEFF}// header\nvitam\n"));
+    assert!(
+        bom_stdin_out.status.success(),
+        "stderr: {}",
+        stderr_str(&bom_stdin_out)
+    );
+    assert_eq!(stdout_str(&bom_stdin_out), "vitam -> vida\n");
+
+    // 2. Total deletion to empty word `""` across `run`, `trace`, and `compare`.
+    let del_tree_dsl = r#"
+segment m = [nasal, bilabial, +voiced]
+stage root {}
+stage keep from root {}
+stage drop from root {
+  rule del_m:
+    m > ∅ / _ #
+}
+"#;
+    let del_tree_path = dir.write_file("del_tree.phon", del_tree_dsl);
+    let del_tree = del_tree_path.to_str().expect("utf8 path");
+
+    let del_run = run_cli(&["run", mvp, "m"], None);
+    assert_eq!(stdout_str(&del_run), "m -> \n");
+
+    let del_trace = run_cli(&["trace", mvp, "m"], None);
+    assert_eq!(
+        stdout_str(&del_trace),
+        "m -> \n  [R1] Final -m deletion: m -> \n"
+    );
+
+    let del_compare_text = run_cli(&["compare", del_tree, "m"], None);
+    assert!(
+        del_compare_text.status.success(),
+        "stderr: {}",
+        stderr_str(&del_compare_text)
+    );
+    let compare_str = stdout_str(&del_compare_text);
+    assert_eq!(
+        compare_str,
+        "Input  drop  keep\n-----  ----  ----\nm            m\n"
+    );
+    for line in compare_str.lines() {
+        assert!(!line.ends_with(' '), "trailing space in {line:?}");
+    }
+
+    let del_compare_last_empty =
+        run_cli(&["compare", del_tree, "--stages", "keep,drop", "m"], None);
+    assert_eq!(
+        stdout_str(&del_compare_last_empty),
+        "Input  keep  drop\n-----  ----  ----\nm      m\n"
+    );
+
+    // 3. Zero input words -> exit code 0 across all commands and formats.
+    let tree_path = dir.write_file("greek.phon", HELLENIC_DSL);
+    let tree = tree_path.to_str().expect("utf8 path");
+    for (args, expected_stdout) in [
+        (&["run", mvp][..], ""),
+        (
+            &["run", mvp, "-f", "markdown"][..],
+            "| Input | Output |\n| --- | --- |\n",
+        ),
+        (
+            &["run", mvp, "-f", "json"][..],
+            "{\n  \"command\": \"run\",\n  \"stage\": null,\n  \"results\": []\n}\n",
+        ),
+        (&["trace", mvp][..], ""),
+        (&["trace", mvp, "-f", "markdown"][..], ""),
+        (
+            &["trace", mvp, "-f", "json"][..],
+            "{\n  \"command\": \"trace\",\n  \"stage\": null,\n  \"results\": []\n}\n",
+        ),
+        (&["compare", tree][..], ""),
+        (
+            &["compare", tree, "-f", "markdown"][..],
+            "| Input | attic | ionic |\n| --- | --- | --- |\n",
+        ),
+        (
+            &["compare", tree, "-f", "json"][..],
+            "{\n  \"command\": \"compare\",\n  \"stages\": [\"attic\", \"ionic\"],\n  \"results\": []\n}\n",
+        ),
+    ] {
+        let out = run_cli(args, Some(""));
+        assert!(out.status.success(), "args {args:?}: {}", stderr_str(&out));
+        assert_eq!(stdout_str(&out), expected_stdout, "args {args:?}");
+    }
+
+    // 4. Rule name containing quotes, backslashes, and pipes in Markdown and JSON.
+    let special_dsl = r#"
+segment a = [vowel, low, central]
+segment o = [vowel, mid-high, back, +rounded]
+rule R_ESC "a|b \"q\" \\s":
+  a > o
+"#;
+    let special_path = dir.write_file("special.phon", special_dsl);
+    let special = special_path.to_str().expect("utf8 path");
+
+    let special_md = run_cli(&["trace", special, "-f", "markdown", "a"], None);
+    assert_eq!(
+        stdout_str(&special_md),
+        concat!(
+            "## a -> o\n\n",
+            "| Rule ID | Rule | Before | After |\n",
+            "| --- | --- | --- | --- |\n",
+            "| R_ESC | a\\|b \"q\" \\s | a | o |\n",
+        )
+    );
+
+    let special_json = run_cli(&["trace", special, "-f", "json", "a"], None);
+    assert_eq!(
+        stdout_str(&special_json),
+        concat!(
+            "{\n",
+            "  \"command\": \"trace\",\n",
+            "  \"stage\": null,\n",
+            "  \"results\": [\n",
+            "    {\n",
+            "      \"input\": \"a\",\n",
+            "      \"output\": \"o\",\n",
+            "      \"steps\": [\n",
+            "        {\n",
+            "          \"rule_id\": \"R_ESC\",\n",
+            "          \"rule_name\": \"a|b \\\"q\\\" \\\\s\",\n",
+            "          \"before\": \"a\",\n",
+            "          \"after\": \"o\"\n",
+            "        }\n",
+            "      ]\n",
+            "    }\n",
+            "  ]\n",
+            "}\n",
+        )
+    );
 }

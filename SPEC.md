@@ -52,10 +52,10 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
   - `to_spaced` (y `Display`) escribe cada segmento como su símbolo, precedido de `ˈ` si tiene
     `Stress::Primary` o de `ˌ` si tiene `Stress::Secondary`, separados por espacios (`t e kʰ ˈeː s`).
   - `to_compact` escribe cada segmento concatenado sin espacios, precediendo cada segmento acentuado
-    con `Stress::ipa_marker()` (`ˈ` o `ˌ`), p. ej. `tekʰˈeːs`. Cuando ninguna marca está registrada
-    como símbolo en el inventario, es consistente con el ida y vuelta de `tokenize_word`:
-    `tokenize_word(&word.to_compact(), inventory) == Ok(word)` (bajo un inventario sin ambigüedad
-    *maximal munch*).
+    con `Stress::ipa_marker()` (`ˈ` o `ˌ`), p. ej. `tekʰˈeːs`. Cuando el acento recae solo en
+    segmentos silábicos (`bundle.syllabic == true`), ninguna marca está registrada como símbolo en el
+    inventario y el inventario no tiene ambigüedad *maximal munch*, es reversible con
+    `tokenize_word`: `tokenize_word(&word.to_compact(), inventory) == Ok(word)`.
   - `from_spaced` acepta ese prefijo: si un token no es un símbolo registrado, empieza con una marca de
     acento que no está registrada como símbolo y el resto sí es un símbolo registrado, el segmento
     recibe el acento de la marca. En cualquier otro caso devuelve `InventoryError::UnknownSymbol` con el
@@ -340,7 +340,7 @@ stage ionic "Ionic Greek" from proto_greek {
 #### Opciones y entradas comunes (`run`, `trace`, `compare`)
 - `<RULES>`: ruta al archivo DSL en UTF-8 NFC (o `-` para leer el archivo DSL desde `stdin`). Debe declarar al menos un `segment`; si el inventario resultante está vacío, devuelve `CliError::EmptyInventory`.
 - `[WORDS]...`: palabras posicionales a derivar.
-- `-w, --words <PATH>`: archivo de texto UTF-8 con una palabra por línea (se recortan espacios iniciales/finales; se ignoran líneas vacías y comentarios que comienzan con `//` o `#` tras recortar espacios). Es mutuamente excluyente con `[WORDS]...` (`clap` `conflicts_with`).
+- `-w, --words <PATH>`: archivo de texto UTF-8 con una palabra por línea (se elimina un eventual BOM UTF-8 `U+FEFF` inicial, se recortan espacios iniciales/finales y se ignoran líneas vacías y comentarios que comienzan con `//` o `#` tras recortar espacios). Es mutuamente excluyente con `[WORDS]...` (`clap` `conflicts_with`).
 - **Entrada por `stdin`**: si no se pasan ni `[WORDS]...` ni `--words`, la CLI lee las palabras desde `stdin` aplicando las mismas reglas de filtrado por línea (salvo que `<RULES>` sea `-`, en cuyo caso devuelve `CliError::StdinConflict`).
 - `--spaced`: parsea cada palabra con `Word::from_spaced` y formatea todas las palabras de salida (`input`, `output`, `before`, `after`, `outcomes`) con `Word::to_spaced`. Sin `--spaced`, parsea con `tokenize_word` y formatea con `Word::to_compact`.
 - `-f, --format <text|markdown|json>` (por defecto: `text`): formato de exportación.
@@ -357,7 +357,7 @@ stage ionic "Ionic Greek" from proto_greek {
 
 #### `phonengine compare <RULES> [--stages <ID1,ID2,...>] [--spaced] [-f <FORMAT>] [-o <PATH>] [-w <PATH> | WORDS...]`
 - Exige que `<RULES>` defina bloques `stage` (`CliError::CompareRequiresDialectTree` si solo hay reglas planas).
-- `--stages` acepta nombres separados por comas y puede repetirse (`--stages attic,ionic` o `--stages attic --stages ionic`). Rechaza duplicados con `CliError::DuplicateStageSelection(String)` y etapas inexistentes en el árbol con `CliError::UnknownStage(String)`.
+- `--stages` acepta nombres separados por comas y puede repetirse (`--stages attic,ionic` o `--stages attic --stages ionic`). Rechaza duplicados con `CliError::DuplicateStageSelection(String)` y etapas inexistentes en el árbol (incluido un identificador vacío como `--stages ""`) con `CliError::UnknownStage(String)`.
 - Si se omite `--stages`, selecciona todas las etapas hoja del árbol (`TreeDerivation::leaf_outcomes()`) en orden lexicográfico determinista por `stage_id`.
 - Evalúa cada palabra una única vez con `DialectTree::derive_tree` y proyecta los resultados en el orden exacto de las etapas seleccionadas.
 
@@ -378,7 +378,7 @@ stage ionic "Ionic Greek" from proto_greek {
       [<rule_id>] <rule_name>: <before> -> <after>
   ```
   Si una etapa no tuvo cambios efectivos, imprime `    (no changes)` debajo de su cabecera.
-- **`compare`**: tabla de texto alineada por columnas con cabecera `Input` seguida de cada `<stage_id>` seleccionado y un separador `---` bajo cada columna (o salida vacía si no hay palabras).
+- **`compare`**: tabla de texto alineada por columnas con cabecera `Input` seguida de cada `<stage_id>` seleccionado y un separador de guiones ajustado al ancho de cada columna (mínimo 3 guiones `---`), sin espacios finales sobrantes por línea aunque la última celda esté vacía (o salida vacía si no hay palabras).
 
 #### 2. `markdown`
 Las celdas de tabla escapan `|` como `\|`.
@@ -473,7 +473,7 @@ JSON válido conforme a RFC 8259 generado a mano de forma determinista (indentac
 - **`0`**: ejecución exitosa (incluye el caso válido de 0 palabras de entrada).
 - **`2`**: error de sintaxis o conflicto de argumentos de línea de comandos (manejado por `clap`).
 - **`1`**: error de ejecución (`CliError`), impreso en `stderr` con el prefijo `error: <mensaje>`:
-  - `Io(std::io::Error)`: fallo de lectura/escritura de archivos, `stdin` o `stdout`.
+  - `Io { path: String, source: std::io::Error }`: fallo de lectura/escritura indicando la ruta del archivo o `"stdin"`/`"stdout"`.
   - `Dsl(DslError)`: error de léxico, sintaxis o validación en el archivo de reglas.
   - `EmptyInventory`: el archivo DSL no declara ninguna sentencia `segment`.
   - `Tokenize { word: String, source: TokenizeError }`: error al tokenizar una palabra sin `--spaced`.
@@ -483,5 +483,5 @@ JSON válido conforme a RFC 8259 generado a mano de forma determinista (indentac
   - `UnexpectedStage(String)`: se pasó `--stage` en `run`/`trace` sobre un archivo de reglas planas.
   - `CompareRequiresDialectTree`: `compare` se invocó sobre un archivo sin bloques `stage`.
   - `DuplicateStageSelection(String)`: etapa repetida en `--stages`.
-  - `UnknownStage(String)`: etapa solicitada en `--stages` inexistente en el árbol.
+  - `UnknownStage(String)`: etapa solicitada en `--stage` o `--stages` inexistente en el árbol.
   - `StdinConflict`: `<RULES>` es `-` y no se especificaron palabras por argumentos ni por `--words`.

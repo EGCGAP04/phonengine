@@ -10,7 +10,12 @@ use phonengine::{DslError, EngineError, InventoryError, TokenizeError};
 #[derive(Debug)]
 pub enum CliError {
     /// Failed to read from a file/`stdin` or write to a file/`stdout`.
-    Io(io::Error),
+    Io {
+        /// File path or stream name (`"stdin"` / `"stdout"`) that failed.
+        path: String,
+        /// Underlying OS I/O error.
+        source: io::Error,
+    },
     /// Failed to lex, parse, or validate the DSL rules file.
     Dsl(DslError),
     /// The parsed DSL program declared no `segment` entries.
@@ -50,10 +55,21 @@ pub enum CliError {
     StdinConflict,
 }
 
+impl CliError {
+    /// Constructs a [`CliError::Io`] carrying the failing file path or stream name.
+    #[must_use]
+    pub fn io(path: impl Into<String>, source: io::Error) -> Self {
+        Self::Io {
+            path: path.into(),
+            source,
+        }
+    }
+}
+
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Io(err) => write!(f, "I/O error: {err}"),
+            Self::Io { path, source } => write!(f, "I/O error on {path:?}: {source}"),
             Self::Dsl(err) => write!(f, "DSL error at {err}"),
             Self::EmptyInventory => {
                 f.write_str("rules file must declare at least one `segment` inventory entry")
@@ -91,7 +107,7 @@ impl fmt::Display for CliError {
 impl Error for CliError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::Io(err) => Some(err),
+            Self::Io { source, .. } => Some(source),
             Self::Dsl(err) => Some(err),
             Self::Tokenize { source, .. } => Some(source),
             Self::SpacedParse { source, .. } => Some(source),
@@ -104,12 +120,6 @@ impl Error for CliError {
             | Self::UnknownStage(_)
             | Self::StdinConflict => None,
         }
-    }
-}
-
-impl From<io::Error> for CliError {
-    fn from(err: io::Error) -> Self {
-        Self::Io(err)
     }
 }
 
@@ -126,8 +136,12 @@ mod tests {
 
     #[test]
     fn cli_error_variants_implement_display_and_error_source() {
-        let io_err: CliError = io::Error::new(io::ErrorKind::NotFound, "missing").into();
-        assert!(io_err.to_string().contains("I/O error"));
+        let io_err = CliError::io(
+            "missing.phon",
+            io::Error::new(io::ErrorKind::NotFound, "missing"),
+        );
+        let io_msg = io_err.to_string();
+        assert!(io_msg.contains("I/O error") && io_msg.contains("missing.phon"));
         assert!(io_err.source().is_some());
 
         let dsl_err = parse_program("rule bad").expect_err("invalid DSL");
