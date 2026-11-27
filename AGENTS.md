@@ -2,7 +2,7 @@
 
 ## Reglas de oro
 - Leé `SPEC.md` completo antes de crear módulos o proponer cambios de arquitectura.
-- Trabajá estrictamente dentro del hito activo (**Hito 4**: `src/cli/`, `src/main.rs`, `Word::to_compact` y tests `tests/cli.rs`). Los Hitos 1, 2 y 3 están cerrados.
+- Los Hitos 1–4 están completados (`v0.1.0`); mantené la arquitectura del núcleo y la CLI alineada con `SPEC.md`.
 - `phonology`, `engine` y `dsl` siguen estrictamente `std`-only; únicamente `clap` (con feature `derive`) se permite en `Cargo.toml` y solo se importa desde `src/cli/`. La serialización JSON se hace a mano en `src/cli/` (sin `serde` ni `serde_json`).
 - Determinismo estricto: usá `BTreeMap` / `BTreeSet` / `Vec`; nunca `HashMap` / `HashSet`.
 - Respetá los lints de `Cargo.toml`: prohibido `unsafe`, `.unwrap()`, `.expect()` y `panic!()` en `src/`. Propagá errores mediante `Result` y enums propios que implementen `Display` y `Error`.
@@ -31,7 +31,7 @@
 - **Issues, etiquetas, milestones y proyecto**:
   - Formularios en `.github/ISSUE_TEMPLATE/` (`feature`, `bug`, `chore`, `docs`, `refactor`; issues en blanco deshabilitados). Al usar `gh issue create --body-file`, replicá las secciones del formulario. Al crear o cerrar una milestone, actualizá el desplegable de milestone en los cinco formularios.
   - Cada Issue y PR va asignado a `EGCGAP04` (`--assignee @me`), con etiquetas de tipo (`feature`, `bug`, `chore`, `documentation`, `refactor`, `blocked`) y área (`phonology`, `engine`, `dsl`, `cli`), milestone activa y en el proyecto [#8 `phonengine`](https://github.com/users/EGCGAP04/projects/8) (`In Progress` al arrancar, `Done` al cerrar/mergear).
-  - Milestones abiertas: `M4: CLI and export formats`. Las cierra Enzo (o el agente cuando Enzo lo pida).
+  - Milestones abiertas: ninguna por ahora (`M0`–`M4` completadas con `v0.1.0`). Cuando se abra una nueva milestone, agregala acá y en los formularios de `.github/ISSUE_TEMPLATE/`. Las cierra Enzo (o el agente cuando Enzo lo pida).
 - **Merge**: solo cuando Enzo lo pide para ese PR. Verificá antes que esté `MERGEABLE` y que pasen los checks, luego ejecutá `gh pr merge <N> --squash --match-head-commit <SHA completo>`.
 
 ## Convenciones de Rust e idioma

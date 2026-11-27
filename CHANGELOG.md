@@ -6,66 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Changed
+## [0.1.0] - 2026-11-27
 
-- Applied Milestone 4 review improvements in `SPEC.md` and `src/cli/`:
-  - Enriched `CliError::Io` with the failing file path or stream name (`"stdin"` / `"stdout"`), changed `CommonArgs::rules` to `PathBuf`, and changed `Command::Compare::stages` to `Option<Vec<String>>` so `--stages ""` is distinguished from omitting `--stages`.
-  - Replaced `TraceBody`/`TraceRow` with `TraceOutput::Flat` / `TraceOutput::Staged` and introduced `resolve_target` in `src/cli/mod.rs` to eliminate unreachable state branches.
-  - Clarified `Word::to_compact` round-trip conditions (stress only on syllabic segments), UTF-8 BOM stripping for word inputs, `compare` separator width, and `CliError::UnknownStage` scope in `SPEC.md`.
-- Defined Milestone 4 CLI and export formats specification in `SPEC.md` (`run`, `trace`, `compare`, `--spaced`, `Word::to_compact`, `text`/`markdown`/`json` formats with hand-written deterministic JSON serializer, `clap` as the sole external dependency, and `CliError` exit codes), advanced `AGENTS.md` to Milestone 4, and removed closed `M3` from `.github/ISSUE_TEMPLATE/*.yml`.
-- Fixed the Attic stage of the `SPEC.md` dialect-tree example, which lacked the shared `aː > eː` raising that its `r _` reversion depends on, noted the inventory it omits, listed `RuleError::EmptyId` among the rule validations, and mentioned the minimum supported Rust version in `README.md`.
-- `tokenize_word` attaches `ˈ`/`ˌ` to the next syllabic segment, as IPA writes the marker before the syllable (`tʰeˈkʰaːs` now stresses `aː`, not `kʰ`); a second marker before that segment is a `DuplicateStressMarker`, and a word with no syllabic segment after the marker is a `DanglingStressMarker`.
-- `Word::to_spaced` / `Display` prefix stressed segments with `ˈ`/`ˌ` (`t e kʰ ˈeː s`), and `Word::from_spaced` reads those prefixes back, so the spaced format round-trips.
-- `parse_program` validates symbols automatically when the program declares at least one `segment`.
-- `EngineError::UnmappedFeatureBundle` and `EngineError::UnknownSymbol` are now struct variants that carry the failing `rule_id`, and `DialectTree::derive_stage` / `derive_tree` wrap any error raised inside a stage in `EngineError::StageFailed { stage_id, source }`.
-- `RuleError::UnconstrainedInsertion` now also rejects insertions whose contexts contain only `ZeroOrMore` elements, which matched at every gap.
-- Aligned the GitHub configuration with the sibling repositories: `.gitignore` now ignores Claude Code personal config (`.claude/settings.local.json`, `CLAUDE.local.md`), and `.github/dependabot.yml` groups Cargo minor/patch updates (`cargo-minor-patch`).
-- Declared the minimum supported Rust version (`rust-version = "1.88"`) in `Cargo.toml`, required by edition 2024 let-chains.
-- Defined Milestone 3 specification in `SPEC.md`: $O(|word| \cdot |context|)$ reachability matching for `ZeroOrMore`, single-pass `LeftToRight` / `RightToLeft` directional modes, `DialectTree` / `DialectError` / `TreeDerivation`, removal of transitional `UnsupportedMode` / `UnsupportedContext` errors in favor of `UnknownStage`, and `stage` DSL syntax (`Program::dialect_tree`).
-- Specified the fixes from the Milestone 0–3 review in `SPEC.md`: positional stress inheritance for literal replacements, `RuleError::MisplacedWordBoundary` and a stricter `UnconstrainedInsertion` check, rule/stage context in `EngineError` (`StageFailed`), `DialectError::DuplicateRuleId`, stress-marker assignment to the next syllabic segment, stress prefixes in the spaced word format, automatic DSL validation with `ClassUsedBeforeDeclaration` and `FocusInsideIdentifier`, UTF-8 BOM handling, duplicate-stage spans, and the greedy maximal-munch limitation; added `tests/dialect_tree.rs` to the module tree.
-- Updated `AGENTS.md` to mark Milestone 3 as active (`std`-only through M3) and removed closed `M2` from `.github/ISSUE_TEMPLATE/*.yml`.
-- Specified the complete Milestone 2 DSL (`segment`, `class`, `rule` with 1-based `$k` references), `Span`-based diagnostics (`DslError`), and maximal-munch word tokenizer (`tokenize_word` with IPA stress markers `ˈ`/`ˌ`) in `SPEC.md`.
-- Updated `AGENTS.md` to mark Milestone 2 as active and document the repository's Git/GitHub workflow (protected `main`, SSH-signed commits, squash merge, templates, labels, milestones, and project #8).
-- Removed closed `M0` and `M1` milestone options from `.github/ISSUE_TEMPLATE/*.yml`.
+First release of PhonEngine: deterministic phonological evolution and comparative reconstruction library and CLI in Rust (Milestones 0–4).
 
 ### Added
 
-- Milestone 4 CLI and export formats (`src/cli/`, `src/main.rs`, `tests/cli.rs`):
-  - `clap` (`derive`) binary interface with `run`, `trace`, and `compare` subcommands, supporting positional words, `--words <PATH>`, `stdin` input, rules from `-`, `--spaced`, `--stage`, `--stages`, `-f <text|markdown|json>`, and `-o <PATH>`.
-  - Deterministic hand-written RFC 8259 JSON formatter, GFM Markdown tables, and column-aligned plain-text comparison tables in `src/cli/format.rs` (zero `serde` dependencies).
-  - `CliError` with `Display`/`Error` diagnostics and distinct exit codes (`0`, `1`, `2`).
-  - `Word::to_compact` in `src/phonology/segment.rs` for stress-preserving compact rendering consistent with `tokenize_word`.
-- `Stress::ipa_marker` and `Stress::from_ipa_marker`, shared by the tokenizer and the spaced word format.
-- `DslErrorKind::ClassUsedBeforeDeclaration` and `DslErrorKind::FocusInsideIdentifier`.
-- `RuleError::MisplacedWordBoundary`, `DialectError::DuplicateRuleId`, and `EngineError::StageFailed`.
-- Milestone 3 rule engine & DSL support:
-  - $O(|word| \cdot |context|)$ deterministic DP/NFA reachability matching for `ContextElement::ZeroOrMore`.
-  - Single-pass `ApplicationMode::LeftToRight` and `ApplicationMode::RightToLeft` rule execution for both $N \ge 1$ and $N = 0$ (epenthesis).
-  - Chronological dialect trees (`src/engine/dialect.rs`: `DialectNode`, `DialectTree`, `DialectError`, `StageTrace`, `DialectTrace`, `TreeDerivation`), `EngineError::UnknownStage`, and public crate re-exports in `src/lib.rs`.
-  - DSL `stage <id> ["<name>"] [from <parent>] { ... }` declarations, `Program::dialect_tree`, `DslErrorKind::MixedTopLevelRulesAndStages`, and `DslErrorKind::InvalidDialectTree` in `src/dsl/`, plus unit tests and `tests/dialect_tree.rs`.
-- Milestone 2 DSL and maximal-munch tokenizer (`src/dsl/`): `Span`, `DslError`, `DslErrorKind`, `TokenizeError`, `TokenizeErrorKind`, Unicode-aware `lex`, manual recursive-descent `parse_program` (`segment`, `class`, `rule` with 1-based `$k` references), `Program::validate_against`, and `tokenize_word` supporting IPA stress markers (`ˈ` / `ˌ`), re-exported in `src/lib.rs` with unit tests and `tests/dsl_mvp.rs`.
-- Milestone 1 phonological model (`src/phonology/`): `Manner`, `Place`, `Height`, `Backness`, `Stress`, `FeatureBundle`, `FieldMatch`, `FieldUpdate`, `FeaturePattern`, `FeatureMutation`, `Segment`, `Word`, and bijective `Inventory` backed by `BTreeMap` with `InventoryError`.
-- Milestone 1 rule engine (`src/engine/`): `Rule` validation (`RuleError::EmptyId`, `RuleError::UnconstrainedInsertion`, `RuleError::InvalidSourceIndex`), `Pattern` (literal, feature pattern, `NaturalClass`), `ReplacementItem`, `ContextElement`, `ApplicationMode::Simultaneous`, `apply_rule`, `derive`, `DerivationTrace` omitting vacuous steps, and `EngineError`.
-- Public crate API in `src/lib.rs`, unit tests across all public modules, and `tests/golden_mvp.rs` validating `tests/fixtures/golden_mvp.tsv`.
-- GitHub Actions CI workflow (`Build and test`) running `cargo test`, `cargo clippy --all-targets -- -D warnings`, and `cargo fmt --check`.
-- Dependabot configuration for Cargo crates and GitHub Actions.
-- GitHub issue forms (`feature`, `bug`, `chore`, `docs`, `refactor`) and pull request template.
-- MIT `LICENSE`, `.editorconfig`, `.gitattributes`, `SECURITY.md`, and `README.md`.
+- **Repository setup and governance**: GitHub Actions CI (`Build and test`: `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt --check`), CodeQL, Dependabot (grouped Cargo and GitHub Actions updates), MSRV `1.88` in `Cargo.toml`, MIT `LICENSE`, `SECURITY.md`, `.editorconfig`, `.gitattributes`, issue forms, and pull request template.
+- **Phonological model (`src/phonology/`)**:
+  - `Copy`/`Eq`/`Ord` feature enums (`Manner`, `Place`, `Height`, `Backness`, `Stress` with `ipa_marker` / `from_ipa_marker`) and `FeatureBundle`.
+  - Explicit feature queries and mutations (`FieldMatch`, `FieldUpdate`, `FeaturePattern`, `FeatureMutation`).
+  - `Segment` (keeping `Stress` outside `FeatureBundle`) and `Word` (`from_spaced`, `to_spaced`, `to_compact`, `Display`) with reversible stress-marker formatting.
+  - Strictly bijective `Inventory` backed by `BTreeMap` with `InventoryError`.
+- **Rule engine and dialect trees (`src/engine/`)**:
+  - Validated `Rule` (`RuleError::EmptyId`, `RuleError::UnconstrainedInsertion`, `RuleError::InvalidSourceIndex`, `RuleError::MisplacedWordBoundary`) supporting `Pattern` (literal, feature bundle, `NaturalClass`), general $N \to M$ `ReplacementItem` rewrites with positional stress inheritance, and `ContextElement` (`WordBoundary`, `Segment`, and $O(|word| \cdot |context|)$ `ZeroOrMore`).
+  - Pure `apply_rule` and `derive` supporting `ApplicationMode::Simultaneous`, `LeftToRight`, and `RightToLeft`, returning immutable `DerivationTrace`s omitting vacuous steps.
+  - Chronological `DialectNode` / `DialectTree` (`DialectError`, `StageTrace`, `DialectTrace`, `TreeDerivation`) with shared-ancestor reuse and `EngineError` carrying failing `rule_id` and `StageFailed` stage context.
+- **DSL parser and maximal-munch tokenizer (`src/dsl/`)**:
+  - Unicode-aware `lex` (with leading UTF-8 BOM handling) and manual recursive-descent `parse_program` supporting `segment`, `class`, `rule` (with 1-based `$k` references), and `stage` dialect-tree declarations.
+  - Automatic symbol validation (`Program::validate_against`) with `Span`-positioned diagnostics (`DslError`, `DslErrorKind` including `ClassUsedBeforeDeclaration`, `FocusInsideIdentifier`, `MixedTopLevelRulesAndStages`, `InvalidDialectTree`).
+  - Greedy maximal-munch `tokenize_word` with IPA stress markers (`ˈ`/`ˌ`) attached to the next syllabic segment and positioned `TokenizeError`.
+- **CLI and export formats (`src/cli/`, `src/main.rs`)**:
+  - `clap`-derived `run`, `trace`, and `compare` subcommands supporting positional words, `--words <PATH>` (stripping leading UTF-8 BOM and skipping blank/`//`/`#` lines), `stdin` rules (`-`) or words, `--spaced`, `--stage`, `--stages`, `-f <text|markdown|json>`, and `-o <PATH>`.
+  - Deterministic hand-written RFC 8259 JSON formatter, GFM Markdown tables, and column-aligned plain-text comparison tables (zero `serde` dependencies).
+  - `CliError` with path/stream context (`Io`, `Dsl`, `EmptyInventory`, `Tokenize`, `SpacedParse`, `Engine`, `MissingStage`, `UnexpectedStage`, `CompareRequiresDialectTree`, `DuplicateStageSelection`, `UnknownStage`, `StdinConflict`) and exit codes `0`, `1`, and `2`.
+- **Test suites**: unit tests across all public modules plus external integration suites in `tests/golden_mvp.rs`, `tests/dsl_mvp.rs`, `tests/dialect_tree.rs`, and `tests/cli.rs`.
 
-### Removed
-
-- Transitional Milestone 1/2 errors `EngineError::UnsupportedMode` and `EngineError::UnsupportedContext`, now that `LeftToRight`, `RightToLeft`, and `ZeroOrMore` are implemented in Milestone 3.
-
-### Fixed
-
-- Stripped a leading UTF-8 BOM (`U+FEFF`) in `parse_word_lines` when reading `--words` files or `stdin`, matching the DSL lexer.
-- Trimmed trailing spaces on `compare --format text` lines when the last column has an empty outcome.
-- Expanded `src/cli/` unit tests (`TraceOutput::Staged` in `text`/`markdown`, BOM handling, `--stages ""`, `CliError::Io` path reporting) and `tests/cli.rs` end-to-end coverage (`run --stage`, `trace --stage` in `text`/`markdown`, `--spaced` in `trace`/`compare`, total deletion to `""`, BOM, zero-word inputs, special escaping, and `SpacedParse`/`Engine`/`Io` error exit codes).
-- Literal replacements no longer drop stress: a `ReplacementItem::Literal` at position `i` inherits the stress of the matched segment at `i`, unless a `Mutate` of the same replacement already copies it.
-- A `#` that is not the outermost element of a context is rejected with `RuleError::MisplacedWordBoundary` instead of producing a rule that silently never matches.
-- `DialectTree::new` rejects duplicate rule IDs within a stage, which only the DSL used to catch.
-- Context matching no longer allocates for empty contexts, and the rustdoc of `ContextElement::ZeroOrMore` and `ApplicationMode` no longer describes them as deferred.
-- A typo in a literal pattern, or a class used before its declaration, is reported at parse time (for programs that declare segments) instead of producing a rule that silently never fires.
-- `DuplicateStageId` points at the repeated `stage` declaration instead of the first one.
-- A leading UTF-8 BOM no longer breaks parsing.
-- A context written as `V_V` (one identifier) reports `FocusInsideIdentifier` with a hint to separate the focus, instead of a bare missing-focus error.
+[Unreleased]: https://github.com/EGCGAP04/phonengine/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/EGCGAP04/phonengine/releases/tag/v0.1.0
