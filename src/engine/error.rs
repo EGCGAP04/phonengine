@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use crate::phonology::FeatureBundle;
+use crate::phonology::{FeatureBundle, FeatureDomain, FeatureField};
 
 /// Validation error produced when constructing a [`Rule`](crate::engine::Rule).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +33,49 @@ pub enum RuleError {
         /// Length of the rule's `target` pattern vector.
         target_len: usize,
     },
+    /// An alpha variable has an empty or whitespace-only name.
+    InvalidVariableName {
+        /// Identifier of the invalid rule.
+        rule_id: String,
+        /// Invalid variable name string.
+        var: String,
+    },
+    /// Negated variable polarity (`-α`) used on a non-boolean phonological field.
+    InvalidVariablePolarity {
+        /// Identifier of the invalid rule.
+        rule_id: String,
+        /// Alpha variable identifier.
+        var: String,
+        /// Non-boolean field where opposite polarity was attempted.
+        field: FeatureField,
+    },
+    /// Same alpha variable name used across incompatible [`FeatureDomain`]s within one rule.
+    IncompatibleVariableDomain {
+        /// Identifier of the invalid rule.
+        rule_id: String,
+        /// Alpha variable identifier.
+        var: String,
+        /// First domain encountered for `var`.
+        first: FeatureDomain,
+        /// Conflicting domain encountered later for `var`.
+        second: FeatureDomain,
+    },
+    /// Same feature or stress field constrained or mutated more than once on one segment spec.
+    ConflictingFeatureConstraint {
+        /// Identifier of the invalid rule.
+        rule_id: String,
+        /// Conflicting phonological or prosodic field.
+        field: FeatureField,
+    },
+    /// Replacement references an alpha variable that is not guaranteed to be bound before
+    /// replacement evaluation (must appear in `target` or as a fixed `ContextElement::Segment`
+    /// in every branch of `environments`).
+    UnboundVariable {
+        /// Identifier of the invalid rule.
+        rule_id: String,
+        /// Unbound alpha variable identifier.
+        var: String,
+    },
 }
 
 impl fmt::Display for RuleError {
@@ -54,6 +97,37 @@ impl fmt::Display for RuleError {
             } => write!(
                 f,
                 "rule {rule_id:?} references source_index {source_index} but target has length {target_len}"
+            ),
+            Self::InvalidVariableName { rule_id, var } => {
+                write!(
+                    f,
+                    "rule {rule_id:?} has an invalid variable name {var:?}: variable names must not be empty"
+                )
+            }
+            Self::InvalidVariablePolarity {
+                rule_id,
+                var,
+                field,
+            } => write!(
+                f,
+                "rule {rule_id:?} negates non-boolean field {field:?} using variable '-{var}'"
+            ),
+            Self::IncompatibleVariableDomain {
+                rule_id,
+                var,
+                first,
+                second,
+            } => write!(
+                f,
+                "rule {rule_id:?} uses variable {var:?} in incompatible domains ({first} vs {second})"
+            ),
+            Self::ConflictingFeatureConstraint { rule_id, field } => write!(
+                f,
+                "rule {rule_id:?} constrains or mutates feature {field:?} more than once on the same segment"
+            ),
+            Self::UnboundVariable { rule_id, var } => write!(
+                f,
+                "rule {rule_id:?} replacement references variable {var:?}, which is not guaranteed to be bound by target or every context branch"
             ),
         }
     }
@@ -207,6 +281,29 @@ mod tests {
                 rule_id: "R_IDX".to_owned(),
                 source_index: 2,
                 target_len: 1,
+            },
+            RuleError::InvalidVariableName {
+                rule_id: "R_VAR".to_owned(),
+                var: String::new(),
+            },
+            RuleError::InvalidVariablePolarity {
+                rule_id: "R_VAR".to_owned(),
+                var: "α".to_owned(),
+                field: FeatureField::Place,
+            },
+            RuleError::IncompatibleVariableDomain {
+                rule_id: "R_VAR".to_owned(),
+                var: "α".to_owned(),
+                first: FeatureDomain::Place,
+                second: FeatureDomain::Bool,
+            },
+            RuleError::ConflictingFeatureConstraint {
+                rule_id: "R_VAR".to_owned(),
+                field: FeatureField::Voiced,
+            },
+            RuleError::UnboundVariable {
+                rule_id: "R_VAR".to_owned(),
+                var: "α".to_owned(),
             },
         ];
         for err in errors {

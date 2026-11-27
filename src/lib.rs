@@ -9,11 +9,14 @@ pub use dsl::{
     tokenize_word,
 };
 pub use engine::{
-    ApplicationMode, ContextElement, DerivationStep, DerivationTrace, DialectError, DialectNode,
-    DialectTrace, DialectTree, EngineError, NaturalClass, Pattern, ReplacementItem, Rule,
-    RuleError, StageTrace, TreeDerivation, apply_rule, derive,
+    ApplicationMode, ConstrainedPattern, ContextElement, DerivationStep, DerivationTrace,
+    DialectError, DialectNode, DialectTrace, DialectTree, EngineError, Environment, NaturalClass,
+    Pattern, PatternBase, ReplacementItem, Rule, RuleError, SegmentMutation, StageTrace,
+    TreeDerivation, apply_rule, derive,
 };
 pub use phonology::{
-    Backness, FeatureBundle, FeatureMutation, FeaturePattern, FieldMatch, FieldUpdate, Height,
-    Inventory, InventoryError, Manner, Place, Segment, Stress, Word,
+    Backness, FeatureBundle, FeatureDomain, FeatureField, FeatureMutation, FeaturePattern,
+    FeatureVar, FeatureVarValue, FieldMatch, FieldUpdate, Height, Inventory, InventoryError,
+    LiteralStress, Manner, Place, Segment, Stress, StressMatch, StressUpdate, VarBindings,
+    VarPolarity, Word,
 };

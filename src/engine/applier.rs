@@ -1,10 +1,15 @@
 //! Pure rule-application engine supporting Simultaneous, LeftToRight, RightToLeft,
-//! and non-local `ZeroOrMore` contexts.
+//! prosodic stress matching/mutations, alpha feature variables, multi-context environments,
+//! optional elements, and non-local `ZeroOrMore` contexts.
 
-use crate::phonology::{Inventory, Segment, Stress, Word};
+use std::collections::BTreeMap;
+
+use crate::phonology::{
+    FeatureVarValue, Inventory, LiteralStress, Segment, Stress, VarBindings, Word,
+};
 
 use super::error::{EngineError, RuleError};
-use super::rule::{ApplicationMode, ContextElement, Pattern, ReplacementItem, Rule};
+use super::rule::{ApplicationMode, ContextElement, Environment, Pattern, ReplacementItem, Rule};
 use super::trace::{DerivationStep, DerivationTrace};
 
 /// Applies a single phonological `rule` to `word` using `inventory` without mutating inputs.
@@ -70,11 +75,12 @@ fn apply_simultaneous(
     let mut output = Vec::with_capacity(snapshot.len());
 
     if target.is_empty() {
+        let initial = VarBindings::new();
         for pos in 0..=snapshot.len() {
-            if matches_left_context(snapshot, pos, rule.left_context())
-                && matches_right_context(snapshot, pos, rule.right_context())
+            if let Some(bindings) =
+                match_environments(snapshot, pos, pos, rule.environments(), &initial)
             {
-                append_replacement(&mut output, rule, &[], inventory)?;
+                append_replacement(&mut output, rule, &[], &bindings, inventory)?;
             }
             if let Some(seg) = snapshot.get(pos) {
                 output.push(seg.clone());
@@ -85,13 +91,14 @@ fn apply_simultaneous(
 
     let mut pos = 0;
     while pos < snapshot.len() {
-        if pos + target.len() <= snapshot.len()
-            && matches_target(&snapshot[pos..pos + target.len()], target)
-            && matches_left_context(snapshot, pos, rule.left_context())
-            && matches_right_context(snapshot, pos + target.len(), rule.right_context())
+        let end = pos + target.len();
+        if end <= snapshot.len()
+            && let Some(target_bindings) = match_target(&snapshot[pos..end], target)
+            && let Some(bindings) =
+                match_environments(snapshot, pos, end, rule.environments(), &target_bindings)
         {
-            let matched = &snapshot[pos..pos + target.len()];
-            append_replacement(&mut output, rule, matched, inventory)?;
+            let matched = &snapshot[pos..end];
+            append_replacement(&mut output, rule, matched, &bindings, inventory)?;
             pos += target.len();
         } else {
             output.push(snapshot[pos].clone());
@@ -111,12 +118,13 @@ fn apply_left_to_right(
     let target = rule.target();
 
     if target.is_empty() {
+        let initial = VarBindings::new();
         let mut pos = 0;
         loop {
-            let inserted_len = if matches_left_context(&current, pos, rule.left_context())
-                && matches_right_context(&current, pos, rule.right_context())
+            let inserted_len = if let Some(bindings) =
+                match_environments(&current, pos, pos, rule.environments(), &initial)
             {
-                let repl = build_replacement(rule, &[], inventory)?;
+                let repl = build_replacement(rule, &[], &bindings, inventory)?;
                 let len = repl.len();
                 current.splice(pos..pos, repl);
                 len
@@ -133,13 +141,14 @@ fn apply_left_to_right(
 
     let mut pos = 0;
     while pos + target.len() <= current.len() {
-        if matches_target(&current[pos..pos + target.len()], target)
-            && matches_left_context(&current, pos, rule.left_context())
-            && matches_right_context(&current, pos + target.len(), rule.right_context())
+        let end = pos + target.len();
+        if let Some(target_bindings) = match_target(&current[pos..end], target)
+            && let Some(bindings) =
+                match_environments(&current, pos, end, rule.environments(), &target_bindings)
         {
-            let repl = build_replacement(rule, &current[pos..pos + target.len()], inventory)?;
+            let repl = build_replacement(rule, &current[pos..end], &bindings, inventory)?;
             let repl_len = repl.len();
-            current.splice(pos..pos + target.len(), repl);
+            current.splice(pos..end, repl);
             pos += repl_len;
         } else {
             pos += 1;
@@ -158,12 +167,13 @@ fn apply_right_to_left(
     let target = rule.target();
 
     if target.is_empty() {
+        let initial = VarBindings::new();
         let mut pos = current.len();
         loop {
-            if matches_left_context(&current, pos, rule.left_context())
-                && matches_right_context(&current, pos, rule.right_context())
+            if let Some(bindings) =
+                match_environments(&current, pos, pos, rule.environments(), &initial)
             {
-                let repl = build_replacement(rule, &[], inventory)?;
+                let repl = build_replacement(rule, &[], &bindings, inventory)?;
                 current.splice(pos..pos, repl);
             }
             if pos == 0 {
@@ -177,11 +187,11 @@ fn apply_right_to_left(
     let mut end = current.len();
     while end >= target.len() {
         let start = end - target.len();
-        if matches_target(&current[start..end], target)
-            && matches_left_context(&current, start, rule.left_context())
-            && matches_right_context(&current, end, rule.right_context())
+        if let Some(target_bindings) = match_target(&current[start..end], target)
+            && let Some(bindings) =
+                match_environments(&current, start, end, rule.environments(), &target_bindings)
         {
-            let repl = build_replacement(rule, &current[start..end], inventory)?;
+            let repl = build_replacement(rule, &current[start..end], &bindings, inventory)?;
             current.splice(start..end, repl);
             end = start;
         } else {
@@ -192,18 +202,60 @@ fn apply_right_to_left(
     Ok(Word::new(current))
 }
 
-fn matches_target(slice: &[Segment], target: &[Pattern]) -> bool {
-    slice.len() == target.len()
-        && slice
-            .iter()
-            .zip(target.iter())
-            .all(|(seg, pat)| pat.matches(seg))
+fn match_target(slice: &[Segment], target: &[Pattern]) -> Option<VarBindings> {
+    if slice.len() != target.len() {
+        return None;
+    }
+    let mut bindings = VarBindings::new();
+    for (seg, pat) in slice.iter().zip(target.iter()) {
+        if !pat.matches_with_bindings(seg, &mut bindings) {
+            return None;
+        }
+    }
+    Some(bindings)
 }
 
-fn matches_left_context(snapshot: &[Segment], start: usize, left: &[ContextElement]) -> bool {
-    if left.is_empty() {
-        return true;
+fn match_environments(
+    snapshot: &[Segment],
+    start: usize,
+    end: usize,
+    environments: &[Environment],
+    initial_bindings: &VarBindings,
+) -> Option<VarBindings> {
+    if environments.is_empty() {
+        return Some(initial_bindings.clone());
     }
+    for env in environments {
+        let left_candidates = match_left_context(snapshot, start, &env.left, initial_bindings);
+        for left_bindings in left_candidates {
+            if let Some(final_bindings) =
+                match_right_context(snapshot, end, &env.right, &left_bindings)
+            {
+                return Some(final_bindings);
+            }
+        }
+    }
+    None
+}
+
+fn context_has_unbound_vars(context: &[ContextElement], bindings: &VarBindings) -> bool {
+    context.iter().any(|elem| {
+        let vars = match elem {
+            ContextElement::WordBoundary => &[],
+            ContextElement::Segment(pat)
+            | ContextElement::Optional(pat)
+            | ContextElement::ZeroOrMore(pat) => pat.vars(),
+        };
+        vars.iter().any(|var| !bindings.contains(&var.name))
+    })
+}
+
+fn match_left_fast(
+    snapshot: &[Segment],
+    start: usize,
+    left: &[ContextElement],
+    bindings: &VarBindings,
+) -> bool {
     let n = snapshot.len();
     let mut reachable = vec![false; n + 1];
     reachable[start] = true;
@@ -225,7 +277,9 @@ fn matches_left_context(snapshot: &[Segment], start: usize, left: &[ContextEleme
                 let mut next = vec![false; n + 1];
                 let mut any = false;
                 for idx in 1..=n {
-                    if reachable[idx] && pat.matches(&snapshot[idx - 1]) {
+                    if reachable[idx]
+                        && pat.matches_with_fixed_bindings(&snapshot[idx - 1], bindings)
+                    {
                         next[idx - 1] = true;
                         any = true;
                     }
@@ -235,9 +289,22 @@ fn matches_left_context(snapshot: &[Segment], start: usize, left: &[ContextEleme
                 }
                 reachable = next;
             }
+            ContextElement::Optional(pat) => {
+                let mut next = reachable.clone();
+                for idx in 1..=n {
+                    if reachable[idx]
+                        && pat.matches_with_fixed_bindings(&snapshot[idx - 1], bindings)
+                    {
+                        next[idx - 1] = true;
+                    }
+                }
+                reachable = next;
+            }
             ContextElement::ZeroOrMore(pat) => {
                 for idx in (1..=n).rev() {
-                    if reachable[idx] && pat.matches(&snapshot[idx - 1]) {
+                    if reachable[idx]
+                        && pat.matches_with_fixed_bindings(&snapshot[idx - 1], bindings)
+                    {
                         reachable[idx - 1] = true;
                     }
                 }
@@ -248,10 +315,12 @@ fn matches_left_context(snapshot: &[Segment], start: usize, left: &[ContextEleme
     boundary_reached || reachable.iter().any(|&flag| flag)
 }
 
-fn matches_right_context(snapshot: &[Segment], end: usize, right: &[ContextElement]) -> bool {
-    if right.is_empty() {
-        return true;
-    }
+fn match_right_fast(
+    snapshot: &[Segment],
+    end: usize,
+    right: &[ContextElement],
+    bindings: &VarBindings,
+) -> bool {
     let n = snapshot.len();
     let mut reachable = vec![false; n + 1];
     reachable[end] = true;
@@ -273,7 +342,7 @@ fn matches_right_context(snapshot: &[Segment], end: usize, right: &[ContextEleme
                 let mut next = vec![false; n + 1];
                 let mut any = false;
                 for idx in 0..n {
-                    if reachable[idx] && pat.matches(&snapshot[idx]) {
+                    if reachable[idx] && pat.matches_with_fixed_bindings(&snapshot[idx], bindings) {
                         next[idx + 1] = true;
                         any = true;
                     }
@@ -283,9 +352,18 @@ fn matches_right_context(snapshot: &[Segment], end: usize, right: &[ContextEleme
                 }
                 reachable = next;
             }
+            ContextElement::Optional(pat) => {
+                let mut next = reachable.clone();
+                for idx in 0..n {
+                    if reachable[idx] && pat.matches_with_fixed_bindings(&snapshot[idx], bindings) {
+                        next[idx + 1] = true;
+                    }
+                }
+                reachable = next;
+            }
             ContextElement::ZeroOrMore(pat) => {
                 for idx in 0..n {
-                    if reachable[idx] && pat.matches(&snapshot[idx]) {
+                    if reachable[idx] && pat.matches_with_fixed_bindings(&snapshot[idx], bindings) {
                         reachable[idx + 1] = true;
                     }
                 }
@@ -296,13 +374,274 @@ fn matches_right_context(snapshot: &[Segment], end: usize, right: &[ContextEleme
     boundary_reached || reachable.iter().any(|&flag| flag)
 }
 
+fn insert_dp_state(
+    slot: &mut BTreeMap<VarBindings, Vec<usize>>,
+    bindings: VarBindings,
+    key: Vec<usize>,
+) {
+    match slot.get_mut(&bindings) {
+        Some(existing_key) => {
+            if key < *existing_key {
+                *existing_key = key;
+            }
+        }
+        None => {
+            slot.insert(bindings, key);
+        }
+    }
+}
+
+fn step_pattern_states(
+    source: &BTreeMap<VarBindings, Vec<usize>>,
+    dest: &mut BTreeMap<VarBindings, Vec<usize>>,
+    pat: &Pattern,
+    seg: &Segment,
+    focus_dist: usize,
+) {
+    for (bindings, key) in source {
+        let mut trial = bindings.clone();
+        if pat.matches_with_bindings(seg, &mut trial) {
+            let mut next_key = key.clone();
+            if trial.len() > bindings.len() {
+                next_key.push(focus_dist);
+            }
+            insert_dp_state(dest, trial, next_key);
+        }
+    }
+}
+
+fn match_left_context(
+    snapshot: &[Segment],
+    start: usize,
+    left: &[ContextElement],
+    initial_bindings: &VarBindings,
+) -> Vec<VarBindings> {
+    if left.is_empty() {
+        return vec![initial_bindings.clone()];
+    }
+    if !context_has_unbound_vars(left, initial_bindings) {
+        return if match_left_fast(snapshot, start, left, initial_bindings) {
+            vec![initial_bindings.clone()]
+        } else {
+            Vec::new()
+        };
+    }
+
+    let n = snapshot.len();
+    let mut reachable: Vec<BTreeMap<VarBindings, Vec<usize>>> = vec![BTreeMap::new(); n + 1];
+    reachable[start].insert(initial_bindings.clone(), Vec::new());
+    let mut boundary_bindings = BTreeMap::new();
+    let mut boundary_reached = false;
+
+    for elem in left.iter().rev() {
+        if boundary_reached {
+            return Vec::new();
+        }
+        match elem {
+            ContextElement::WordBoundary => {
+                if reachable[0].is_empty() {
+                    return Vec::new();
+                }
+                boundary_bindings = std::mem::take(&mut reachable[0]);
+                for slot in &mut reachable {
+                    slot.clear();
+                }
+                boundary_reached = true;
+            }
+            ContextElement::Segment(pat) => {
+                let mut next: Vec<BTreeMap<VarBindings, Vec<usize>>> = vec![BTreeMap::new(); n + 1];
+                for idx in 1..=n {
+                    if reachable[idx].is_empty() {
+                        continue;
+                    }
+                    let dist = start.saturating_sub(idx);
+                    step_pattern_states(
+                        &reachable[idx],
+                        &mut next[idx - 1],
+                        pat,
+                        &snapshot[idx - 1],
+                        dist,
+                    );
+                }
+                if next.iter().all(BTreeMap::is_empty) {
+                    return Vec::new();
+                }
+                reachable = next;
+            }
+            ContextElement::Optional(pat) => {
+                let mut next = reachable.clone();
+                for idx in 1..=n {
+                    if reachable[idx].is_empty() {
+                        continue;
+                    }
+                    let dist = start.saturating_sub(idx);
+                    step_pattern_states(
+                        &reachable[idx],
+                        &mut next[idx - 1],
+                        pat,
+                        &snapshot[idx - 1],
+                        dist,
+                    );
+                }
+                reachable = next;
+            }
+            ContextElement::ZeroOrMore(pat) => {
+                for idx in (1..=n).rev() {
+                    if reachable[idx].is_empty() {
+                        continue;
+                    }
+                    let dist = start.saturating_sub(idx);
+                    let current_slot = reachable[idx].clone();
+                    step_pattern_states(
+                        &current_slot,
+                        &mut reachable[idx - 1],
+                        pat,
+                        &snapshot[idx - 1],
+                        dist,
+                    );
+                }
+            }
+        }
+    }
+
+    let final_map = if boundary_reached {
+        boundary_bindings
+    } else {
+        let mut merged = BTreeMap::new();
+        for slot in reachable {
+            for (bindings, key) in slot {
+                insert_dp_state(&mut merged, bindings, key);
+            }
+        }
+        merged
+    };
+
+    let mut ranked: Vec<(Vec<usize>, VarBindings)> = final_map
+        .into_iter()
+        .map(|(bindings, key)| (key, bindings))
+        .collect();
+    ranked.sort();
+    ranked.into_iter().map(|(_, bindings)| bindings).collect()
+}
+
+fn match_right_context(
+    snapshot: &[Segment],
+    end: usize,
+    right: &[ContextElement],
+    initial_bindings: &VarBindings,
+) -> Option<VarBindings> {
+    if right.is_empty() {
+        return Some(initial_bindings.clone());
+    }
+    if !context_has_unbound_vars(right, initial_bindings) {
+        return match_right_fast(snapshot, end, right, initial_bindings)
+            .then(|| initial_bindings.clone());
+    }
+
+    let n = snapshot.len();
+    let mut reachable: Vec<BTreeMap<VarBindings, Vec<usize>>> = vec![BTreeMap::new(); n + 1];
+    reachable[end].insert(initial_bindings.clone(), Vec::new());
+    let mut boundary_bindings = BTreeMap::new();
+    let mut boundary_reached = false;
+
+    for elem in right {
+        if boundary_reached {
+            return None;
+        }
+        match elem {
+            ContextElement::WordBoundary => {
+                if reachable[n].is_empty() {
+                    return None;
+                }
+                boundary_bindings = std::mem::take(&mut reachable[n]);
+                for slot in &mut reachable {
+                    slot.clear();
+                }
+                boundary_reached = true;
+            }
+            ContextElement::Segment(pat) => {
+                let mut next: Vec<BTreeMap<VarBindings, Vec<usize>>> = vec![BTreeMap::new(); n + 1];
+                for idx in 0..n {
+                    if reachable[idx].is_empty() {
+                        continue;
+                    }
+                    let dist = idx.saturating_sub(end);
+                    step_pattern_states(
+                        &reachable[idx],
+                        &mut next[idx + 1],
+                        pat,
+                        &snapshot[idx],
+                        dist,
+                    );
+                }
+                if next.iter().all(BTreeMap::is_empty) {
+                    return None;
+                }
+                reachable = next;
+            }
+            ContextElement::Optional(pat) => {
+                let mut next = reachable.clone();
+                for idx in 0..n {
+                    if reachable[idx].is_empty() {
+                        continue;
+                    }
+                    let dist = idx.saturating_sub(end);
+                    step_pattern_states(
+                        &reachable[idx],
+                        &mut next[idx + 1],
+                        pat,
+                        &snapshot[idx],
+                        dist,
+                    );
+                }
+                reachable = next;
+            }
+            ContextElement::ZeroOrMore(pat) => {
+                for idx in 0..n {
+                    if reachable[idx].is_empty() {
+                        continue;
+                    }
+                    let dist = idx.saturating_sub(end);
+                    let current_slot = reachable[idx].clone();
+                    step_pattern_states(
+                        &current_slot,
+                        &mut reachable[idx + 1],
+                        pat,
+                        &snapshot[idx],
+                        dist,
+                    );
+                }
+            }
+        }
+    }
+
+    let final_map = if boundary_reached {
+        boundary_bindings
+    } else {
+        let mut merged = BTreeMap::new();
+        for slot in reachable {
+            for (bindings, key) in slot {
+                insert_dp_state(&mut merged, bindings, key);
+            }
+        }
+        merged
+    };
+
+    final_map
+        .into_iter()
+        .map(|(bindings, key)| (key, bindings))
+        .min()
+        .map(|(_, bindings)| bindings)
+}
+
 fn build_replacement(
     rule: &Rule,
     matched: &[Segment],
+    bindings: &VarBindings,
     inventory: &Inventory,
 ) -> Result<Vec<Segment>, EngineError> {
     let mut built = Vec::with_capacity(rule.replacement().len());
-    append_replacement(&mut built, rule, matched, inventory)?;
+    append_replacement(&mut built, rule, matched, bindings, inventory)?;
     Ok(built)
 }
 
@@ -310,6 +649,7 @@ fn append_replacement(
     output: &mut Vec<Segment>,
     rule: &Rule,
     matched: &[Segment],
+    bindings: &VarBindings,
     inventory: &Inventory,
 ) -> Result<(), EngineError> {
     let replacement = rule.replacement();
@@ -323,6 +663,30 @@ fn append_replacement(
                 };
                 output.push(inventory.segment(symbol, stress).map_err(unknown_symbol)?);
             }
+            ReplacementItem::LiteralWithStress { symbol, stress } => {
+                let resolved_stress = match stress {
+                    LiteralStress::Inherit => inherited_stress(replacement, matched, position),
+                    LiteralStress::Set(level) => *level,
+                    LiteralStress::Var(name) => match bindings.get(name) {
+                        Some(FeatureVarValue::Stress(level)) => level,
+                        _ => {
+                            return Err(EngineError::InvalidRule(RuleError::UnboundVariable {
+                                rule_id: rule.id().to_owned(),
+                                var: name.clone(),
+                            }));
+                        }
+                    },
+                };
+                let unknown_symbol = |_| EngineError::UnknownSymbol {
+                    rule_id: rule.id().to_owned(),
+                    symbol: symbol.clone(),
+                };
+                output.push(
+                    inventory
+                        .segment(symbol, resolved_stress)
+                        .map_err(unknown_symbol)?,
+                );
+            }
             ReplacementItem::Mutate {
                 source_index,
                 mutation,
@@ -334,14 +698,24 @@ fn append_replacement(
                         target_len: rule.target().len(),
                     })
                 })?;
-                let new_bundle = mutation.apply(&source.bundle);
+                let mut new_bundle = mutation.features.apply(&source.bundle);
+                let mut new_stress = mutation.stress.apply(source.stress);
+                for var in &mutation.vars {
+                    let resolved = bindings.resolve(var).ok_or_else(|| {
+                        EngineError::InvalidRule(RuleError::UnboundVariable {
+                            rule_id: rule.id().to_owned(),
+                            var: var.name.clone(),
+                        })
+                    })?;
+                    resolved.apply_to(var.field, &mut new_bundle, &mut new_stress);
+                }
                 let new_symbol = inventory.resolve(&new_bundle).ok_or_else(|| {
                     EngineError::UnmappedFeatureBundle {
                         rule_id: rule.id().to_owned(),
                         bundle: new_bundle,
                     }
                 })?;
-                output.push(Segment::new(new_symbol, new_bundle, source.stress));
+                output.push(Segment::new(new_symbol, new_bundle, new_stress));
             }
         }
     }
@@ -371,7 +745,8 @@ fn inherited_stress(
 mod tests {
     use super::*;
     use crate::phonology::{
-        Backness, FeatureBundle, FeatureMutation, FeaturePattern, Height, Manner, Place,
+        Backness, FeatureBundle, FeatureField, FeatureMutation, FeaturePattern, FeatureVar, Height,
+        Manner, Place, StressMatch, StressUpdate,
     };
 
     fn test_inventory() -> Result<Inventory, crate::phonology::InventoryError> {
@@ -541,7 +916,7 @@ mod tests {
                 ReplacementItem::Literal("j".to_owned()),
                 ReplacementItem::Mutate {
                     source_index: 0,
-                    mutation: FeatureMutation::new(),
+                    mutation: FeatureMutation::new().into(),
                 },
             ],
             vec![],
@@ -567,7 +942,7 @@ mod tests {
             ],
             vec![ReplacementItem::Mutate {
                 source_index: 0,
-                mutation: FeatureMutation::new().set_long(true),
+                mutation: FeatureMutation::new().set_long(true).into(),
             }],
             vec![],
             vec![ContextElement::Segment(Pattern::Literal("s".to_owned()))],
@@ -592,11 +967,11 @@ mod tests {
             vec![
                 ReplacementItem::Mutate {
                     source_index: 1,
-                    mutation: FeatureMutation::new(),
+                    mutation: FeatureMutation::new().into(),
                 },
                 ReplacementItem::Mutate {
                     source_index: 0,
-                    mutation: FeatureMutation::new(),
+                    mutation: FeatureMutation::new().into(),
                 },
             ],
             vec![],
@@ -668,7 +1043,7 @@ mod tests {
             )],
             vec![ReplacementItem::Mutate {
                 source_index: 0,
-                mutation: FeatureMutation::new().set_aspirated(false),
+                mutation: FeatureMutation::new().set_aspirated(false).into(),
             }],
             vec![],
             vec![
@@ -872,7 +1247,7 @@ mod tests {
             )],
             vec![ReplacementItem::Mutate {
                 source_index: 0,
-                mutation: FeatureMutation::new().set_voiced(true),
+                mutation: FeatureMutation::new().set_voiced(true).into(),
             }],
             vec![ContextElement::Segment(Pattern::Features(
                 FeaturePattern::new().with_manner(Manner::Vowel),
@@ -923,7 +1298,7 @@ mod tests {
             vec![Pattern::Literal("f".to_owned())],
             vec![ReplacementItem::Mutate {
                 source_index: 0,
-                mutation: FeatureMutation::new().set_voiced(true),
+                mutation: FeatureMutation::new().set_voiced(true).into(),
             }],
             vec![],
             vec![],
@@ -964,7 +1339,7 @@ mod tests {
         let pat = |sym: &str| Pattern::Literal(sym.to_owned());
         let copy = |source_index: usize| ReplacementItem::Mutate {
             source_index,
-            mutation: FeatureMutation::new(),
+            mutation: FeatureMutation::new().into(),
         };
         let rule = |target: Vec<Pattern>, replacement: Vec<ReplacementItem>| {
             Rule::new(
@@ -1060,6 +1435,440 @@ mod tests {
         assert_eq!(
             stresses(&apply_rule(&p_stressed_o, &raise_rtl, &inv)?),
             expect(&[("p", u), ("u", p)])
+        );
+        Ok(())
+    }
+
+    fn m5_inventory() -> Result<Inventory, crate::phonology::InventoryError> {
+        let mut inv = test_inventory()?;
+        inv.insert(
+            "ŋ",
+            FeatureBundle::consonant(Manner::Nasal, Place::Velar, true),
+        )?;
+        inv.insert(
+            "g",
+            FeatureBundle::consonant(Manner::Stop, Place::Velar, true),
+        )?;
+        inv.insert(
+            "y",
+            FeatureBundle::vowel(Height::High, Backness::Front, true),
+        )?;
+        inv.insert(
+            "ɯ",
+            FeatureBundle::vowel(Height::High, Backness::Back, false),
+        )?;
+        inv.insert(
+            "ɨ",
+            FeatureBundle::vowel(Height::High, Backness::Central, false),
+        )?;
+        Ok(inv)
+    }
+
+    #[test]
+    fn stress_conditioned_rules_syncope_and_literal_stress_copy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::rule::{ConstrainedPattern, PatternBase, SegmentMutation};
+
+        let inv = m5_inventory()?;
+
+        // Stressed e -> j ˈe (explicit stress assignment on second segment only).
+        let stressed_e = Pattern::Constrained(
+            ConstrainedPattern::new(PatternBase::Literal("e".to_owned()))
+                .with_stress(StressMatch::Stressed),
+        );
+        let diph = Rule::new(
+            "R_STRESS_DIPH",
+            "Diphthongize stressed e",
+            vec![stressed_e],
+            vec![
+                ReplacementItem::LiteralWithStress {
+                    symbol: "j".to_owned(),
+                    stress: LiteralStress::Set(Stress::Unstressed),
+                },
+                ReplacementItem::LiteralWithStress {
+                    symbol: "e".to_owned(),
+                    stress: LiteralStress::Set(Stress::Primary),
+                },
+            ],
+            vec![],
+            vec![],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("t ˈe n e", &inv)?, &diph, &inv)?.to_spaced(),
+            "t j ˈe n e"
+        );
+        // Secondary stress also matches StressMatch::Stressed.
+        assert_eq!(
+            apply_rule(&Word::from_spaced("t ˌe n", &inv)?, &diph, &inv)?.to_spaced(),
+            "t j ˈe n"
+        );
+
+        // Exact StressMatch::Is(Secondary) vs StressUpdate::Set(Unstressed) and LiteralStress::Var.
+        let unstressed_syncope = Rule::new(
+            "R_SYNCOPE",
+            "Delete unstressed i between t and r",
+            vec![Pattern::Constrained(
+                ConstrainedPattern::new(PatternBase::Literal("i".to_owned()))
+                    .with_stress(StressMatch::Is(Stress::Unstressed)),
+            )],
+            vec![],
+            vec![ContextElement::Segment(Pattern::Literal("t".to_owned()))],
+            vec![ContextElement::Segment(Pattern::Literal("r".to_owned()))],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(
+                &Word::from_spaced("p ˈe t i r", &inv)?,
+                &unstressed_syncope,
+                &inv
+            )?
+            .to_spaced(),
+            "p ˈe t r"
+        );
+        assert_eq!(
+            apply_rule(
+                &Word::from_spaced("p t ˈi r", &inv)?,
+                &unstressed_syncope,
+                &inv
+            )?
+            .to_spaced(),
+            "p t ˈi r"
+        );
+
+        // Mutate StressUpdate::Set(Secondary) and LiteralStress::Var copying stress from right context.
+        let de_stress = Rule::new(
+            "R_SEC_STRESS",
+            "Demote primary stress on vowel before r",
+            vec![Pattern::Constrained(
+                ConstrainedPattern::new(PatternBase::Features(
+                    FeaturePattern::new().with_manner(Manner::Vowel),
+                ))
+                .with_stress(StressMatch::Is(Stress::Primary)),
+            )],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: SegmentMutation::new().with_stress(StressUpdate::Set(Stress::Secondary)),
+            }],
+            vec![],
+            vec![ContextElement::Segment(Pattern::Literal("r".to_owned()))],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("p ˈa r t", &inv)?, &de_stress, &inv)?.to_spaced(),
+            "p ˌa r t"
+        );
+
+        let copy_stress = Rule::new(
+            "R_COPY_STRESS",
+            "Copy stress from following vowel onto e",
+            vec![Pattern::Literal("e".to_owned())],
+            vec![ReplacementItem::LiteralWithStress {
+                symbol: "a".to_owned(),
+                stress: LiteralStress::Var("s".to_owned()),
+            }],
+            vec![],
+            vec![ContextElement::Segment(Pattern::Constrained(
+                ConstrainedPattern::new(PatternBase::Features(
+                    FeaturePattern::new().with_manner(Manner::Vowel),
+                ))
+                .with_var(FeatureVar::same(FeatureField::Stress, "s")),
+            ))],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("t e ˈi", &inv)?, &copy_stress, &inv)?.to_spaced(),
+            "t ˈa ˈi"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn alpha_variables_support_nasal_assimilation_polarity_sharing_and_harmony()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::rule::{ConstrainedPattern, PatternBase, SegmentMutation};
+
+        let inv = m5_inventory()?;
+
+        // `[nasal] > [αplace] / _ [stop, αplace]`
+        let nasal_assim = Rule::new(
+            "R_NASAL_ASSIM",
+            "Homorganic nasal place assimilation",
+            vec![Pattern::Features(
+                FeaturePattern::new().with_manner(Manner::Nasal),
+            )],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: SegmentMutation::new()
+                    .with_var(FeatureVar::same(FeatureField::Place, "α")),
+            }],
+            vec![],
+            vec![ContextElement::Segment(Pattern::Constrained(
+                ConstrainedPattern::new(PatternBase::Features(
+                    FeaturePattern::new().with_manner(Manner::Stop),
+                ))
+                .with_var(FeatureVar::same(FeatureField::Place, "α")),
+            ))],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("i n p a", &inv)?, &nasal_assim, &inv)?.to_spaced(),
+            "i m p a"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a m k a", &inv)?, &nasal_assim, &inv)?.to_spaced(),
+            "a ŋ k a"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a m t a", &inv)?, &nasal_assim, &inv)?.to_spaced(),
+            "a n t a"
+        );
+
+        // Negated polarity `-αvoiced`: voicing dissimilation `[stop] > [-αvoiced] / _ [stop, αvoiced]`
+        let voice_dissim = Rule::new(
+            "R_DISSIM",
+            "Stop voicing dissimilation before stop",
+            vec![Pattern::Features(
+                FeaturePattern::new().with_manner(Manner::Stop),
+            )],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: SegmentMutation::new()
+                    .with_var(FeatureVar::opposite(FeatureField::Voiced, "α")),
+            }],
+            vec![],
+            vec![ContextElement::Segment(Pattern::Constrained(
+                ConstrainedPattern::new(PatternBase::Features(
+                    FeaturePattern::new().with_manner(Manner::Stop),
+                ))
+                .with_var(FeatureVar::same(FeatureField::Voiced, "α")),
+            ))],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a p t a", &inv)?, &voice_dissim, &inv)?.to_spaced(),
+            "a b t a"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a d k a", &inv)?, &voice_dissim, &inv)?.to_spaced(),
+            "a d k a"
+        );
+
+        // Multi-variable vowel harmony across consonants: `[high, vowel] > [αbackness, βrounded] / [vowel, αbackness, βrounded] C* _`
+        let not_vowel = Pattern::Features(FeaturePattern::new().with_syllabic(false));
+        let harmony = Rule::new(
+            "R_HARMONY",
+            "Progressive high-vowel backness and rounding harmony",
+            vec![Pattern::Features(
+                FeaturePattern::new()
+                    .with_manner(Manner::Vowel)
+                    .with_height(crate::phonology::FieldMatch::Is(Height::High)),
+            )],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: SegmentMutation::new()
+                    .with_var(FeatureVar::same(FeatureField::Backness, "α"))
+                    .with_var(FeatureVar::same(FeatureField::Rounded, "β")),
+            }],
+            vec![
+                ContextElement::Segment(Pattern::Constrained(
+                    ConstrainedPattern::new(PatternBase::Features(
+                        FeaturePattern::new().with_manner(Manner::Vowel),
+                    ))
+                    .with_var(FeatureVar::same(FeatureField::Backness, "α"))
+                    .with_var(FeatureVar::same(FeatureField::Rounded, "β")),
+                )),
+                ContextElement::ZeroOrMore(not_vowel),
+            ],
+            vec![],
+            ApplicationMode::LeftToRight,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("y t u p i", &inv)?, &harmony, &inv)?.to_spaced(),
+            "y t y p y"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a t i p y", &inv)?, &harmony, &inv)?.to_spaced(),
+            "a t ɨ p ɨ"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("t i p u", &inv)?, &harmony, &inv)?.to_spaced(),
+            "t i p i"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("u t i", &inv)?, &harmony, &inv)?.to_spaced(),
+            "u t u"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("o t i", &inv)?, &harmony, &inv)?.to_spaced(),
+            "o t u"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("ɯ t i", &inv)?, &harmony, &inv)?.to_spaced(),
+            "ɯ t ɯ"
+        );
+
+        // Cross-boolean sharing: `[+stop, αvoiced] > [αaspirated]` (voiceless stops deaspirate, voiced would aspirate — check `pʰ` -> `p`).
+        let cross_bool = Rule::new(
+            "R_CROSS_BOOL",
+            "Link aspiration to voicing",
+            vec![Pattern::Constrained(
+                ConstrainedPattern::new(PatternBase::Features(
+                    FeaturePattern::new().with_manner(Manner::Stop),
+                ))
+                .with_var(FeatureVar::same(FeatureField::Voiced, "α")),
+            )],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: SegmentMutation::new()
+                    .with_var(FeatureVar::same(FeatureField::Aspirated, "α")),
+            }],
+            vec![],
+            vec![],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("ph a", &inv)?, &cross_bool, &inv)?.to_spaced(),
+            "p a"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn closest_to_focus_tie_breaking_multi_environment_and_optional()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::rule::{ConstrainedPattern, PatternBase, SegmentMutation};
+
+        let inv = m5_inventory()?;
+        let vowel = Pattern::Features(FeaturePattern::new().with_manner(Manner::Vowel));
+        let alpha_vowel = Pattern::Constrained(
+            ConstrainedPattern::new(PatternBase::Features(
+                FeaturePattern::new().with_manner(Manner::Vowel),
+            ))
+            .with_var(FeatureVar::same(FeatureField::Backness, "α")),
+        );
+
+        // Closest-to-focus: `[vowel, αbackness] V* _` over `i u t`:
+        // `u` is closer to `t` (dist 0) than `i` (dist 1), so `α` binds to `Back` and `t` -> `k`?
+        // Test directly on high vowel `y` after `i u`: `[vowel, αbackness] V* _`.
+        let left_closest = Rule::new(
+            "R_CLOSEST",
+            "Assimilate vowel backness to closest preceding vowel across V*",
+            vec![Pattern::Features(
+                FeaturePattern::new()
+                    .with_manner(Manner::Vowel)
+                    .with_height(crate::phonology::FieldMatch::Is(Height::High)),
+            )],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: SegmentMutation::new()
+                    .with_var(FeatureVar::same(FeatureField::Backness, "α")),
+            }],
+            vec![
+                ContextElement::Segment(alpha_vowel.clone()),
+                ContextElement::ZeroOrMore(vowel.clone()),
+            ],
+            vec![],
+            ApplicationMode::Simultaneous,
+        )?;
+        // Neither `e` (MidHigh) nor `o` (MidHigh) matches `target` (`Height::High`), isolating `y`.
+        // Closest preceding vowel to `y` (idx 2) is `o` (Back, dist 0) rather than `e` (Front, dist 1).
+        assert_eq!(
+            apply_rule(&Word::from_spaced("e o y", &inv)?, &left_closest, &inv)?.to_spaced(),
+            "e o u"
+        );
+
+        // Cross-context compatibility: `[vowel, αbackness] V* _ [vowel, αbackness]` over `i u t e`.
+        // Closest in left is `u` (Back), which disagrees with right `e` (Front), so `{α: Front}`
+        // from `i` is selected instead and `t` voices to `d`.
+        let cross_ctx = Rule::new(
+            "R_CROSS_CTX",
+            "Voice t between matching-backness vowels across V*",
+            vec![Pattern::Literal("t".to_owned())],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: FeatureMutation::new().set_voiced(true).into(),
+            }],
+            vec![
+                ContextElement::Segment(alpha_vowel.clone()),
+                ContextElement::ZeroOrMore(vowel),
+            ],
+            vec![ContextElement::Segment(alpha_vowel.clone())],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("i u t e", &inv)?, &cross_ctx, &inv)?.to_spaced(),
+            "i u d e"
+        );
+
+        // Multi-environment disjunction priority + Optional `(r)` element.
+        let r = Pattern::Literal("r".to_owned());
+        let p_lit = Pattern::Literal("p".to_owned());
+        let stop = Pattern::Constrained(
+            ConstrainedPattern::new(PatternBase::Features(
+                FeaturePattern::new().with_manner(Manner::Stop),
+            ))
+            .with_var(FeatureVar::same(FeatureField::Place, "α")),
+        );
+        let multi = Rule::with_environments(
+            "R_MULTI_ENV",
+            "Assimilate nasal across optional r before stop, else word-finally to velar",
+            vec![Pattern::Features(
+                FeaturePattern::new().with_manner(Manner::Nasal),
+            )],
+            vec![ReplacementItem::Mutate {
+                source_index: 0,
+                mutation: SegmentMutation::new()
+                    .with_var(FeatureVar::same(FeatureField::Place, "α")),
+            }],
+            vec![
+                Environment::new(
+                    vec![],
+                    vec![ContextElement::Optional(r), ContextElement::Segment(stop)],
+                ),
+                Environment::new(
+                    vec![ContextElement::Segment(Pattern::Constrained(
+                        ConstrainedPattern::new(PatternBase::Features(
+                            FeaturePattern::new().with_manner(Manner::Stop),
+                        ))
+                        .with_var(FeatureVar::same(FeatureField::Place, "α")),
+                    ))],
+                    vec![ContextElement::WordBoundary],
+                ),
+            ],
+            ApplicationMode::Simultaneous,
+        )?;
+        // Branch 1 matches with optional `r` present (`n r k` -> `ŋ r k`) and absent (`n p` -> `m p`).
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a n r k a", &inv)?, &multi, &inv)?.to_spaced(),
+            "a ŋ r k a"
+        );
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a n p a", &inv)?, &multi, &inv)?.to_spaced(),
+            "a m p a"
+        );
+        // Branch 2 fires word-finally (`k m #` -> `k ŋ #`).
+        assert_eq!(
+            apply_rule(&Word::from_spaced("a k m", &inv)?, &multi, &inv)?.to_spaced(),
+            "a k ŋ"
+        );
+
+        // Optional in RightToLeft mode (`a > e / p (r) _`): works both for `p a` and `p r a`.
+        let opt_rtl = Rule::new(
+            "R_OPT_RTL",
+            "Raise a after p with optional r",
+            vec![Pattern::Literal("a".to_owned())],
+            vec![ReplacementItem::Literal("e".to_owned())],
+            vec![
+                ContextElement::Segment(p_lit),
+                ContextElement::Optional(Pattern::Literal("r".to_owned())),
+            ],
+            vec![],
+            ApplicationMode::RightToLeft,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("p a p r a", &inv)?, &opt_rtl, &inv)?.to_spaced(),
+            "p e p r e"
         );
         Ok(())
     }

@@ -9,5 +9,8 @@ pub mod trace;
 pub use applier::{apply_rule, derive};
 pub use dialect::{DialectNode, DialectTrace, DialectTree, StageTrace, TreeDerivation};
 pub use error::{DialectError, EngineError, RuleError};
-pub use rule::{ApplicationMode, ContextElement, NaturalClass, Pattern, ReplacementItem, Rule};
+pub use rule::{
+    ApplicationMode, ConstrainedPattern, ContextElement, Environment, NaturalClass, Pattern,
+    PatternBase, ReplacementItem, Rule, SegmentMutation,
+};
 pub use trace::{DerivationStep, DerivationTrace};

@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 ### Added
 
 - Milestone 5 specification in `SPEC.md` defining stress-aware rule patterns and mutations (`StressMatch`, `StressUpdate`, `LiteralStress`), alpha feature assimilation/dissimilation variables (`FeatureDomain`, `FeatureField`, `VarPolarity`, `FeatureVar`, `FeatureVarValue`, `VarBindings`), multi-context `|` environments, optional `(X)` context elements, and planned `examples/` historical grammars.
+- Prosodic stress matching/mutations (`StressMatch`, `StressUpdate`, `LiteralStress`) and alpha feature variable types (`FeatureDomain`, `FeatureField`, `VarPolarity`, `FeatureVar`, `FeatureVarValue`, `VarBindings`) in `src/phonology/pattern.rs` and `src/lib.rs`.
+- Multi-context disjunctive `Environment`s (`Rule::with_environments`), `ContextElement::Optional`, `Pattern::Constrained` / `ConstrainedPattern` / `PatternBase`, `SegmentMutation`, `ReplacementItem::LiteralWithStress`, extended `RuleError` static validation, and deterministic closest-to-focus variable-binding DP matching in `src/engine/`.
 - Opened GitHub milestones `M5: Phonological expressiveness` and `M6: Comparative reconstruction`, and added both to `.github/ISSUE_TEMPLATE/*.yml`, `AGENTS.md`, and `README.md`.
 
 ### Changed
