@@ -48,14 +48,19 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
   `Inventory::segment`, `Word::from_spaced` y `tokenize_word` construyen segmentos coherentes
   (`symbol` ↔ `bundle`); quien construya un `Segment` a mano es responsable de esa coherencia, porque
   `Pattern::Literal` y `NaturalClass` comparan `symbol` mientras que `FeaturePattern` compara `bundle`.
-- **Formato espaciado con acento (`Word::to_spaced` / `Display` y `Word::from_spaced`)**:
+- **Formato espaciado y compacto con acento (`Word::to_spaced` / `Display`, `Word::to_compact` y `Word::from_spaced`)**:
   - `to_spaced` (y `Display`) escribe cada segmento como su símbolo, precedido de `ˈ` si tiene
     `Stress::Primary` o de `ˌ` si tiene `Stress::Secondary`, separados por espacios (`t e kʰ ˈeː s`).
+  - `to_compact` escribe cada segmento concatenado sin espacios, precediendo cada segmento acentuado
+    con `Stress::ipa_marker()` (`ˈ` o `ˌ`), p. ej. `tekʰˈeːs`. Cuando ninguna marca está registrada
+    como símbolo en el inventario, es consistente con el ida y vuelta de `tokenize_word`:
+    `tokenize_word(&word.to_compact(), inventory) == Ok(word)` (bajo un inventario sin ambigüedad
+    *maximal munch*).
   - `from_spaced` acepta ese prefijo: si un token no es un símbolo registrado, empieza con una marca de
     acento que no está registrada como símbolo y el resto sí es un símbolo registrado, el segmento
     recibe el acento de la marca. En cualquier otro caso devuelve `InventoryError::UnknownSymbol` con el
     token completo.
-  - Si ninguna marca está registrada como símbolo, el formato es reversible:
+  - Si ninguna marca está registrada como símbolo, el formato espaciado es reversible:
     `Word::from_spaced(&word.to_spaced(), inventory) == Ok(word)`.
 - **Patrones y mutaciones explícitos**:
   - `FieldMatch<T>`: `Any`, `Is(T)`, `IsNone` (usado en `FeaturePattern` para consultar campos `Option<T>`).
@@ -135,23 +140,24 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
 ```text
 src/
 ├── lib.rs           # API pública del crate (consumida por tests/ y main.rs)
-├── main.rs          # Punto de entrada mínimo (CLI completo en Hito 4)
+├── main.rs          # Punto de entrada mínimo; declara `mod cli;` y despacha a `src/cli/`
 ├── phonology/       # Features, Pattern/Mutation, Segment, Inventory, Word
 ├── engine/          # Rule, Context (local y ZeroOrMore), Applier (3 modos), DialectTree, DerivationTrace, Errors
 ├── dsl/             # Lexer, parser recursive descent (`Program`, incl. `stage`), diagnósticos y maximal munch
-└── cli/             # (Hito 4) Comandos: run, trace, compare
+└── cli/             # Comandos `run`, `trace`, `compare`, `CliError` y exportación a texto / Markdown / JSON
 tests/
 ├── fixtures/        # Casos de prueba golden (TSV)
 ├── golden_mvp.rs    # Suite de integración contra fixtures
 ├── dsl_mvp.rs       # Suite de integración DSL + maximal munch
-└── dialect_tree.rs  # Suite de integración de árboles de dialectos, bloques stage y modos direccionales
+├── dialect_tree.rs  # Suite de integración de árboles de dialectos, bloques stage y modos direccionales
+└── cli.rs           # Suite de integración end-to-end del binario CLI
 ```
 
 ## Hoja de ruta
 - **Hito 1 (Completado)**: `phonology/` + `engine/` + `tests/golden_mvp.rs` pasando.
 - **Hito 2 (Completado)**: `dsl/` (parser *recursive descent* manual, declaraciones `segment`/`class`/`rule`, diagnósticos con `Span`, tokenizador *maximal munch* con marcas de acento `ˈ`/`ˌ`).
-- **Hito 3 (Actual)**: Árbol de dialectos y etapas cronológicas (`DialectTree`, bloques `stage` en DSL), modos direccionales (`LeftToRight`, `RightToLeft`) y contextos no locales (`ZeroOrMore`). Incluye las correcciones de la revisión de los Hitos 0–3: herencia de acento en reemplazos literales, validación de `#` y de inserciones, errores con contexto de regla y etapa, acento en el formato espaciado y diagnósticos del DSL.
-- **Hito 4**: CLI con `clap` y exportación a Markdown / JSON.
+- **Hito 3 (Completado)**: Árbol de dialectos y etapas cronológicas (`DialectTree`, bloques `stage` en DSL), modos direccionales (`LeftToRight`, `RightToLeft`) y contextos no locales (`ZeroOrMore`). Incluye las correcciones de la revisión de los Hitos 0–3: herencia de acento en reemplazos literales, validación de `#` y de inserciones, errores con contexto de regla y etapa, acento en el formato espaciado y diagnósticos del DSL.
+- **Hito 4 (Actual)**: CLI con `clap` (`run`, `trace`, `compare`), `Word::to_compact` y exportación determinista a texto plano, Markdown y JSON (serializado a mano, sin `serde`).
 
 ## Lenguaje DSL y tokenizador maximal munch (`src/dsl/`)
 
@@ -315,3 +321,167 @@ stage ionic "Ionic Greek" from proto_greek {
     aː > eː
 }
 ```
+
+## Interfaz CLI y formatos de exportación (`src/cli/`)
+
+### Dependencias y arquitectura
+- `clap` (4.x con la feature `derive`, compatible con MSRV 1.88) es la única dependencia externa en `Cargo.toml`.
+- `src/phonology/`, `src/engine/` y `src/dsl/` siguen siendo 100 % `std`-only y nunca importan `clap`.
+- `src/cli/` vive como módulo del binario (`mod cli;` en `src/main.rs`) para que la librería (`src/lib.rs`) no exponga tipos de `clap`.
+- Los lints de `Cargo.toml` (`unsafe_code = "forbid"`, `unwrap_used = "deny"`, `expect_used = "deny"`, `panic = "deny"`) aplican también a `src/cli/` y `src/main.rs`.
+- Submódulos previstos en `src/cli/`:
+  - `args.rs`: definición de comandos y flags con `clap::Parser` / `clap::Subcommand` / `clap::ValueEnum`.
+  - `error.rs`: enum `CliError` que implementa `Display` y `std::error::Error`.
+  - `format.rs`: formateadores puros para `text`, `markdown` y JSON RFC 8259 determinista escrito a mano (sin `serde` ni `serde_json`).
+  - `mod.rs`: lectura de entradas, despacho de subcomandos y escritura de salida.
+
+### Subcomandos y argumentos
+
+#### Opciones y entradas comunes (`run`, `trace`, `compare`)
+- `<RULES>`: ruta al archivo DSL en UTF-8 NFC (o `-` para leer el archivo DSL desde `stdin`). Debe declarar al menos un `segment`; si el inventario resultante está vacío, devuelve `CliError::EmptyInventory`.
+- `[WORDS]...`: palabras posicionales a derivar.
+- `-w, --words <PATH>`: archivo de texto UTF-8 con una palabra por línea (se recortan espacios iniciales/finales; se ignoran líneas vacías y comentarios que comienzan con `//` o `#` tras recortar espacios). Es mutuamente excluyente con `[WORDS]...` (`clap` `conflicts_with`).
+- **Entrada por `stdin`**: si no se pasan ni `[WORDS]...` ni `--words`, la CLI lee las palabras desde `stdin` aplicando las mismas reglas de filtrado por línea (salvo que `<RULES>` sea `-`, en cuyo caso devuelve `CliError::StdinConflict`).
+- `--spaced`: parsea cada palabra con `Word::from_spaced` y formatea todas las palabras de salida (`input`, `output`, `before`, `after`, `outcomes`) con `Word::to_spaced`. Sin `--spaced`, parsea con `tokenize_word` y formatea con `Word::to_compact`.
+- `-f, --format <text|markdown|json>` (por defecto: `text`): formato de exportación.
+- `-o, --output <PATH>`: escribe el resultado UTF-8 al archivo indicado en lugar de `stdout`.
+
+#### `phonengine run <RULES> [--stage <STAGE_ID>] [--spaced] [-f <FORMAT>] [-o <PATH>] [-w <PATH> | WORDS...]`
+- Ejecuta las reglas sobre cada palabra y muestra la forma final (en `json` incluye además `rules_fired`, el arreglo ordenado de `rule_id` disparados).
+- Si `<RULES>` define un `DialectTree` (bloques `stage`), `--stage <STAGE_ID>` es obligatorio (`CliError::MissingStage`); deriva la ruta raíz → `<STAGE_ID>` mediante `DialectTree::derive_stage`.
+- Si `<RULES>` define reglas planas de nivel superior y se pasa `--stage`, devuelve `CliError::UnexpectedStage`.
+
+#### `phonengine trace <RULES> [--stage <STAGE_ID>] [--spaced] [-f <FORMAT>] [-o <PATH>] [-w <PATH> | WORDS...]`
+- Misma validación de `--stage` que `run` (`MissingStage` / `UnexpectedStage`).
+- Muestra los pasos efectivos (`word_after != word_before`, omitiendo emparejamientos vacuos). Cuando el programa define bloques `stage`, agrupa los pasos por etapa cronológica (`StageTrace`) a lo largo de la ruta raíz → `<STAGE_ID>`.
+
+#### `phonengine compare <RULES> [--stages <ID1,ID2,...>] [--spaced] [-f <FORMAT>] [-o <PATH>] [-w <PATH> | WORDS...]`
+- Exige que `<RULES>` defina bloques `stage` (`CliError::CompareRequiresDialectTree` si solo hay reglas planas).
+- `--stages` acepta nombres separados por comas y puede repetirse (`--stages attic,ionic` o `--stages attic --stages ionic`). Rechaza duplicados con `CliError::DuplicateStageSelection(String)` y etapas inexistentes en el árbol con `CliError::UnknownStage(String)`.
+- Si se omite `--stages`, selecciona todas las etapas hoja del árbol (`TreeDerivation::leaf_outcomes()`) en orden lexicográfico determinista por `stage_id`.
+- Evalúa cada palabra una única vez con `DialectTree::derive_tree` y proyecta los resultados en el orden exacto de las etapas seleccionadas.
+
+### Formatos de salida (`text`, `markdown`, `json`)
+
+#### 1. `text`
+- **`run`**: una línea por palabra `<input> -> <output>` (si no hay palabras, salida vacía).
+- **`trace` (reglas planas)**: para cada palabra (separadas por una línea en blanco si hay más de una):
+  ```text
+  <input> -> <output>
+    [<rule_id>] <rule_name>: <before> -> <after>
+  ```
+  Si ningún paso cambió la palabra, imprime `  (no changes)` debajo de `<input> -> <output>`.
+- **`trace` (con `--stage`)**: para cada palabra:
+  ```text
+  <input> -> <output> (stage: <target_stage>)
+    stage <stage_id> (<stage_name>): <stage_input> -> <stage_output>
+      [<rule_id>] <rule_name>: <before> -> <after>
+  ```
+  Si una etapa no tuvo cambios efectivos, imprime `    (no changes)` debajo de su cabecera.
+- **`compare`**: tabla de texto alineada por columnas con cabecera `Input` seguida de cada `<stage_id>` seleccionado y un separador `---` bajo cada columna (o salida vacía si no hay palabras).
+
+#### 2. `markdown`
+Las celdas de tabla escapan `|` como `\|`.
+- **`run`**: tabla GFM `| Input | Output |` seguida de `| --- | --- |` y una fila por palabra.
+- **`trace` (reglas planas)**: por cada palabra:
+  - Encabezado `## <input> -> <output>`
+  - Si hay pasos: tabla `| Rule ID | Rule | Before | After |`; si no hay pasos: `_No changes._`.
+- **`trace` (con `--stage`)**: por cada palabra:
+  - Encabezado `## <input> -> <output> (stage: <target_stage>)`
+  - Por cada etapa en la ruta: encabezado `### <stage_id> — <stage_name> (<stage_input> -> <stage_output>)`, seguido de la tabla `| Rule ID | Rule | Before | After |` o `_No changes._`.
+- **`compare`**: tabla GFM `| Input | <stage_1> | <stage_2> | ... |` con una fila por palabra.
+
+#### 3. `json`
+JSON válido conforme a RFC 8259 generado a mano de forma determinista (indentación de 2 espacios, salto de línea final `\n` y escape completo de caracteres de control, comillas `\"` y barras `\\`). El orden de claves de cada objeto es fijo:
+- **`run`**:
+  ```json
+  {
+    "command": "run",
+    "stage": null,
+    "results": [
+      {
+        "input": "vitam",
+        "output": "vida",
+        "rules_fired": ["R1", "R3"]
+      }
+    ]
+  }
+  ```
+  (`"stage"` toma `null` para reglas planas o el `"<stage_id>"` indicado cuando se usa `--stage`).
+- **`trace` (reglas planas)**:
+  ```json
+  {
+    "command": "trace",
+    "stage": null,
+    "results": [
+      {
+        "input": "vitam",
+        "output": "vida",
+        "steps": [
+          {
+            "rule_id": "R1",
+            "rule_name": "Final -m deletion",
+            "before": "vitam",
+            "after": "vita"
+          }
+        ]
+      }
+    ]
+  }
+  ```
+- **`trace` (con `--stage`)**:
+  ```json
+  {
+    "command": "trace",
+    "stage": "attic",
+    "results": [
+      {
+        "input": "tʰeːs",
+        "output": "tʰeːs",
+        "stages": [
+          {
+            "stage_id": "pie",
+            "stage_name": "Proto-Indo-European",
+            "input": "tʰeːs",
+            "output": "tʰeːs",
+            "steps": []
+          }
+        ]
+      }
+    ]
+  }
+  ```
+- **`compare`**:
+  ```json
+  {
+    "command": "compare",
+    "stages": ["attic", "ionic"],
+    "results": [
+      {
+        "input": "maːtʰeːs",
+        "outcomes": {
+          "attic": "meːtʰeːs",
+          "ionic": "meːtʰeːs"
+        }
+      }
+    ]
+  }
+  ```
+  (Las claves de `"outcomes"` respetan el mismo orden que el arreglo `"stages"`).
+
+### Errores (`CliError`) y códigos de salida
+- **`0`**: ejecución exitosa (incluye el caso válido de 0 palabras de entrada).
+- **`2`**: error de sintaxis o conflicto de argumentos de línea de comandos (manejado por `clap`).
+- **`1`**: error de ejecución (`CliError`), impreso en `stderr` con el prefijo `error: <mensaje>`:
+  - `Io(std::io::Error)`: fallo de lectura/escritura de archivos, `stdin` o `stdout`.
+  - `Dsl(DslError)`: error de léxico, sintaxis o validación en el archivo de reglas.
+  - `EmptyInventory`: el archivo DSL no declara ninguna sentencia `segment`.
+  - `Tokenize { word: String, source: TokenizeError }`: error al tokenizar una palabra sin `--spaced`.
+  - `SpacedParse { word: String, source: InventoryError }`: símbolo desconocido al parsear con `--spaced`.
+  - `Engine { word: String, source: EngineError }`: fallo durante la evaluación de reglas o derivación en árbol.
+  - `MissingStage`: el archivo define bloques `stage` pero `run`/`trace` se invocó sin `--stage`.
+  - `UnexpectedStage(String)`: se pasó `--stage` en `run`/`trace` sobre un archivo de reglas planas.
+  - `CompareRequiresDialectTree`: `compare` se invocó sobre un archivo sin bloques `stage`.
+  - `DuplicateStageSelection(String)`: etapa repetida en `--stages`.
+  - `UnknownStage(String)`: etapa solicitada en `--stages` inexistente en el árbol.
+  - `StdinConflict`: `<RULES>` es `-` y no se especificaron palabras por argumentos ni por `--words`.
