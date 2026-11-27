@@ -67,6 +67,18 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
   - `FieldUpdate<T>`: `Keep`, `Set(T)`, `Clear` (usado en `FeatureMutation` para actualizar campos `Option<T>`).
   - `FeaturePattern::matches(&self, bundle: &FeatureBundle) -> bool`.
   - `FeatureMutation::apply(&self, bundle: &FeatureBundle) -> FeatureBundle`.
+- **Prosodia en patrones y mutaciones (Hito 5)**:
+  - `FeatureBundle`, `FeaturePattern` y `FeatureMutation` permanecen estrictamente intrínsecos y `Copy`; el acento y las variables de asimilación operan al nivel de `Segment` y de regla.
+  - `StressMatch` (`Copy`, `Eq`, `Ord`, `Default`): `Any` (por defecto), `Stressed` (`Primary | Secondary`), `Is(Stress)` (`Unstressed`, `Primary`, `Secondary`); expone `StressMatch::matches(&self, stress: Stress) -> bool`.
+  - `StressUpdate` (`Copy`, `Eq`, `Ord`, `Default`): `Keep` (por defecto), `Set(Stress)`; expone `StressUpdate::apply(&self, stress: Stress) -> Stress`.
+  - `LiteralStress` (`Clone`, `Eq`, `Default`): `Inherit` (herencia posicional de `v0.1.0`), `Set(Stress)` (asignación explícita) y `Var(String)` (copia el acento desde una variable ligada de dominio `Stress`).
+- **Variables de rasgos y asimilación ($\alpha$, Hito 5)**:
+  - `FeatureDomain` (`Copy`, `Eq`, `Ord`): `Manner`, `Place`, `Height`, `Backness`, `Bool`, `Stress`.
+  - `FeatureField` (`Copy`, `Eq`, `Ord`): `Manner`, `Place`, `Height`, `Backness`, `Voiced`, `Aspirated`, `Palatalized`, `Labialized`, `Rounded`, `Syllabic`, `Long`, `Stress` (con métodos `domain(&self) -> FeatureDomain` e `is_bool(&self) -> bool`).
+  - `VarPolarity` (`Copy`, `Eq`, `Ord`): `Same` (`α`) y `Opposite` (`-α`, solo válido para campos de dominio `Bool`).
+  - `FeatureVar` (`Clone`, `Eq`, `Ord`): `{ pub field: FeatureField, pub name: String, pub polarity: VarPolarity }`.
+  - `FeatureVarValue` (`Copy`, `Eq`, `Ord`): `Manner(Manner)`, `Place(Place)`, `Height(Height)`, `Backness(Backness)`, `Bool(bool)`, `Stress(Stress)`. Las dimensiones opcionales (`Place`, `Height`, `Backness`) solo ligan valores presentes (`Some(v)`): un segmento con `None` en ese campo no satisface una restricción de variable sobre ese campo.
+  - `VarBindings`: mapa determinista (`BTreeMap<String, FeatureVarValue>`) que almacena los valores ligados durante el emparejamiento de una regla.
 - **`Inventory` biyectivo**:
   Mantiene mapeo bidireccional determinista (`BTreeMap<String, FeatureBundle>` y
   `BTreeMap<FeatureBundle, String>`). `Inventory::insert()` valida unicidad en ambas direcciones
@@ -77,46 +89,50 @@ mediante leyes fonéticas ordenadas hacia uno o más dialectos hijos.
 ## Semántica del motor de reglas (`src/engine/`)
 - **Estructura de `Rule`**:
   - `id: String` y `name: String`
-  - `target: Vec<Pattern>` (donde `Pattern` soporta literal por símbolo, `FeaturePattern` o clase natural)
-  - `replacement: Vec<ReplacementItem>` (`Literal(String)` o `Mutate { source_index: usize, mutation: FeatureMutation }`)
-  - `left_context: Vec<ContextElement>` y `right_context: Vec<ContextElement>`
+  - `target: Vec<Pattern>` donde `Pattern` soporta literal por símbolo, `FeaturePattern`, clase natural o `Constrained(ConstrainedPattern)` (`ConstrainedPattern { pub base: PatternBase, pub stress: StressMatch, pub vars: Vec<FeatureVar> }`, con `PatternBase`: `Literal(String)`, `Features(FeaturePattern)`, `Class(NaturalClass)`).
+  - `replacement: Vec<ReplacementItem>` (`Literal(String)`, `LiteralWithStress { symbol: String, stress: LiteralStress }`, o `Mutate { source_index: usize, mutation: SegmentMutation }` donde `SegmentMutation { pub features: FeatureMutation, pub stress: StressUpdate, pub vars: Vec<FeatureVar> }` e implementa `From<FeatureMutation>`).
+  - `environments: Vec<Environment>` donde `Environment { pub left: Vec<ContextElement>, pub right: Vec<ContextElement> }` (`vec![]` = regla incondicional; 1 o más entornos = disyunción evaluada de izquierda a derecha, ganando el primer entorno que coincida). `Rule::new(...)` construye una regla de entorno único `(left_context, right_context)` (o incondicional si ambos lados son vacíos), y `Rule::with_environments(...)` acepta múltiples ramas.
   - `mode: ApplicationMode` (`Simultaneous`, `LeftToRight`, `RightToLeft`)
 - **Acento en el reemplazo** (sea `matched` el tramo de $N$ segmentos que coincidió con `target`):
-  - `Mutate { source_index: k, .. }` conserva el acento de `matched[k]`.
-  - `Literal` en la posición `i` del reemplazo hereda el acento de `matched[i]` si `i < N` y ningún
-    `Mutate` del mismo reemplazo tiene `source_index == i` (ese segmento ya conserva su acento por otra
-    vía). En cualquier otro caso, incluida la epéntesis ($N = 0$), emite `Stress::Unstressed`.
-  - Ejemplos: `o > u` sobre `pˈo` da `pˈu`; `r t > t r` mantiene el acento por posición, mientras que
-    `r t > $2 $1` lo mueve con cada segmento; `e > i e` acentúa `i` (posición 0), mientras que
-    `e > i $1` acentúa solo `e`.
+  - `Mutate { source_index: k, mutation }` aplica `mutation.stress` (o la variable de dominio `Stress` indicada en `mutation.vars`) sobre `matched[k].stress` (`StressUpdate::Keep` conserva el acento de origen; `Set(s)` lo reemplaza).
+  - `LiteralWithStress { symbol, stress }` con `LiteralStress::Set(s)` o `LiteralStress::Var(name)` emite ese acento explícitamente (sin heredar).
+  - `Literal(symbol)` y `LiteralWithStress { symbol, stress: LiteralStress::Inherit }` en la posición `i` del reemplazo heredan el acento de `matched[i]` si `i < N` y ningún `Mutate` del mismo reemplazo tiene `source_index == i` (ese segmento ya conserva o actualiza su acento por otra vía). En cualquier otro caso, incluida la epéntesis ($N = 0$), emiten `Stress::Unstressed`.
+  - Ejemplos: `o > u` sobre `pˈo` da `pˈu`; `ɛ[+stressed] > j e[+stressed]` sobre `pˈɛ` da `pjˈe`; `r t > t r` mantiene el acento por posición, mientras que `r t > $2 $1` lo mueve con cada segmento; `e > i e` acentúa `i` (posición 0), mientras que `e > i $1` acentúa solo `e`.
 - **`ContextElement`**:
   - `WordBoundary` (`#`)
   - `Segment(Pattern)`
-  - `ZeroOrMore(Pattern)`: clausura de Kleene no local (`Patrón*`, p. ej. ley de Grassmann o armonía vocálica). En `matches_left_context` y `matches_right_context` se evalúa de forma determinista mediante alcanzabilidad DP / autómata finito sobre índices usando `Vec<bool>` en tiempo $O(|palabra| \cdot |contexto|)$ (sin recursión ni *backtracking* exponencial ante secuencias como `V* V*`), manteniendo compatibilidad exacta con `WordBoundary` (`#`) y `Segment(Pattern)`.
+  - `Optional(Pattern)` (`(<patrón>)`, Hito 5): elemento opcional (0 o 1 segmento). Se evalúa deterministamente dentro del autómata DP junto con `ZeroOrMore`. Al poder consumir 0 segmentos, `Optional` tampoco ancla inserciones ni cuenta como posición de ligadura garantizada para variables $\alpha$.
+  - `ZeroOrMore(Pattern)`: clausura de Kleene no local (`Patrón*`, p. ej. ley de Grassmann o armonía vocálica). En `matches_left_context` y `matches_right_context` se evalúa de forma determinista mediante alcanzabilidad DP / autómata finito sobre índices usando `Vec<bool>` en tiempo $O(|palabra| \cdot |contexto|)$ (sin recursión ni *backtracking* exponencial ante secuencias como `V* V*`), manteniendo compatibilidad exacta con `WordBoundary` (`#`), `Segment(Pattern)` y `Optional(Pattern)`.
 - **Validaciones obligatorias de regla (`RuleError`)**:
   - Rechazar un `id` vacío o formado solo por espacios con `RuleError::EmptyId`.
-  - Rechazar inserciones sin anclaje con `RuleError::UnconstrainedInsertion`: `target.is_empty()` cuando ningún contexto contiene un `WordBoundary` o un `Segment(Pattern)`. Un contexto formado solo por elementos `ZeroOrMore` coincide en cualquier brecha, así que no restringe la inserción.
+  - Rechazar inserciones sin anclaje con `RuleError::UnconstrainedInsertion`: cuando `target.is_empty()`, `environments` debe ser no vacío y **cada** rama debe contener al menos un `WordBoundary` o un `Segment(Pattern)`. Un contexto formado solo por elementos `ZeroOrMore` y/u `Optional` coincide en cualquier brecha, así que no restringe la inserción.
   - Rechazar `Mutate { source_index, .. }` fuera de rango (`source_index >= target.len()`) con `RuleError::InvalidSourceIndex`.
-  - Rechazar un `WordBoundary` fuera del borde exterior del contexto con `RuleError::MisplacedWordBoundary { rule_id }`: en `left_context` solo puede ser el primer elemento y en `right_context` solo el último (como máximo uno por lado). En otra posición nunca podría coincidir.
+  - Rechazar un `WordBoundary` fuera del borde exterior de cada rama del contexto con `RuleError::MisplacedWordBoundary { rule_id }`: en `left` solo puede ser el primer elemento y en `right` solo el último (como máximo uno por lado en cada rama). En otra posición nunca podría coincidir.
+  - Validar variables $\alpha$ y restricciones en patrones/mutaciones (Hito 5):
+    - `InvalidVariableName { rule_id, var }`: nombre de variable vacío o formado solo por espacios.
+    - `InvalidVariablePolarity { rule_id, var, field }`: `VarPolarity::Opposite` (`-α`) sobre un campo cuyo dominio no es `Bool`.
+    - `IncompatibleVariableDomain { rule_id, var, first, second }`: una misma variable usada en dos dominios distintos dentro de la misma regla (campos booleanos distintos sí pueden compartir una variable de dominio `Bool`, p. ej. `[+stop, αvoiced] > [αaspirated]`).
+    - `ConflictingFeatureConstraint { rule_id, field }`: un mismo campo restringido o mutado más de una vez en el mismo patrón o mutación (incluyendo concreto + variable, dos variables sobre el mismo campo, o `stress` concreto + variable de `stress`).
+    - `UnboundVariable { rule_id, var }`: variable referenciada en `replacement` que no aparece en ninguna posición de ligadura garantizada (`target` o `ContextElement::Segment` en **todas** las ramas de `environments`; las apariciones dentro de `ZeroOrMore` u `Optional` no garantizan ligadura).
 - **Modos de ejecución (`ApplicationMode`)**:
   - **`Simultaneous`**: evalúa todas las coincidencias no solapadas de izquierda a derecha sobre un *snapshot* inmutable de la palabra antes de construir la salida (evita cascadas y bucles infinitos).
   - **`LeftToRight`**: pasada única de izquierda a derecha con mutación progresiva sobre la palabra `current` (permite *feeding* y *bleeding* deterministas con terminación garantizada en $O(|palabra|)$):
     - Para $N = target.len() \ge 1$: mantiene cursor `pos = 0` mientras `pos + N <= current.len()`. Evalúa target y contextos sobre `current`; si coincide, reemplaza `current[pos..pos + N]` por los $M$ segmentos producidos y avanza `pos += M` (no vuelve a inspeccionar lo recién emitido; `current.len() - pos` decrece estrictamente en $N$). Si no coincide, `pos += 1`.
     - Para epéntesis ($N = 0$): recorre las brechas `0..=current.len()` de izquierda a derecha; si inserta $M$ segmentos en `pos`, avanza saltando lo insertado y el siguiente segmento original (o termina si estaba al final `#`).
   - **`RightToLeft`**: espejo exacto de `LeftToRight` con pasada única de derecha a izquierda:
-    - Para $N = target.len() \ge 1$: mantiene límite derecho exclusivo `end = current.len()` mientras `end >= N`, evalúa `current[end - N..end]` sobre `current`; si coincide, reemplaza ese tramo por los $M$ segmentos producidos y actualiza `end -= N` (lo recién emitido queda a la derecha y es visible en el `right_context` de posiciones anteriores). Si no coincide, `end -= 1`.
-    - Para epéntesis ($N = 0$): recorre `pos` desde `current.len()` hasta `0`; cada inserción de $M$ segmentos en `pos` queda visible en el `right_context` de las posiciones anteriores.
+    - Para $N = target.len() \ge 1$: mantiene límite derecho exclusivo `end = current.len()` mientras `end >= N`, evalúa `current[end - N..end]` sobre `current`; si coincide, reemplaza ese tramo por los $M$ segmentos producidos y actualiza `end -= N` (lo recién emitido queda a la derecha y es visible en el `right` de posiciones anteriores). Si no coincide, `end -= 1`.
+    - Para epéntesis ($N = 0$): recorre `pos` desde `current.len()` hasta `0`; cada inserción de $M$ segmentos en `pos` queda visible en el `right` de las posiciones anteriores.
 - **Errores del motor (`EngineError`)**:
-  - En el Hito 3 se implementan `LeftToRight`, `RightToLeft` y `ZeroOrMore`, por lo que se eliminan las variantes transitorias `UnsupportedMode` y `UnsupportedContext` del Hito 1/2.
   - Variantes:
     - `UnmappedFeatureBundle { rule_id: String, bundle: FeatureBundle }`: una mutación produjo un bundle ausente del inventario.
-    - `UnknownSymbol { rule_id: String, symbol: String }`: un `ReplacementItem::Literal` no está registrado en el inventario.
+    - `UnknownSymbol { rule_id: String, symbol: String }`: un `ReplacementItem::Literal` o `LiteralWithStress` no está registrado en el inventario.
     - `UnknownStage(String)`: consulta sobre una etapa inexistente en un `DialectTree`.
-    - `InvalidRule(RuleError)`: defensiva, si se violan invariantes de `Rule` durante la evaluación.
+    - `InvalidRule(RuleError)`: defensiva, si se violan invariantes de `Rule` durante la evaluación (p. ej. una variable sin ligar al evaluar un reemplazo).
     - `StageFailed { stage_id: String, source: Box<EngineError> }`: `derive_stage` y `derive_tree` envuelven así cualquier error producido al evaluar las reglas de una etapa.
   - Todo error de aplicación identifica la regla (`rule_id`) y, dentro de un árbol, la etapa. `Error::source()` de `StageFailed` devuelve el error envuelto, y `Display` encadena el contexto (`stage "attic": rule "a_raising": ...`).
-- **Alcance diferido**:
-  - Las variables de asimilación (notación $\alpha$, ej. `[αplace]`) quedan explícitamente fuera de los Hitos 1, 2 y 3.
+- **Variables de asimilación y disimilación (notación $\alpha$, Hito 5)**:
+  - Orden determinista de ligadura por candidato de `target`: primero se evalúa `target` de izquierda a derecha (posiciones fijas, ligadura única en `VarBindings`). Si `environments` está vacío, la coincidencia es válida con esas ligaduras; de lo contrario se evalúan las ramas en el orden declarado hasta encontrar la primera que coincida.
+  - Dentro de cada rama se propaga `VarBindings` primero por `left` (desde el foco `_` hacia la izquierda) y luego por `right` (desde el foco `_` hacia la derecha). Si múltiples caminos a través de `ZeroOrMore` / `Optional` satisfacen la misma rama con distintas asignaciones, gana deterministamente la asignación ligada más cercana al foco (`_`, menor distancia al foco). Para reglas sin variables (o cuando no quedan variables sin ligar al entrar en un contexto), el emparejador usa el camino rápido `Vec<bool>`.
 
 ## Árbol de dialectos y etapas cronológicas (`src/engine/dialect.rs`)
 - **Nodos y árbol (`DialectNode`, `DialectTree`)**:
@@ -150,7 +166,11 @@ tests/
 ├── golden_mvp.rs    # Suite de integración contra fixtures
 ├── dsl_mvp.rs       # Suite de integración DSL + maximal munch
 ├── dialect_tree.rs  # Suite de integración de árboles de dialectos, bloques stage y modos direccionales
-└── cli.rs           # Suite de integración end-to-end del binario CLI
+├── cli.rs           # Suite de integración end-to-end del binario CLI
+└── examples.rs      # Suite de integración de gramáticas históricas reales (Hito 5)
+examples/            # Gramáticas históricas reales en DSL (Hito 5)
+├── latin_to_romance.phon
+└── pie_to_greek.phon
 ```
 
 ## Hoja de ruta
@@ -158,6 +178,8 @@ tests/
 - **Hito 2 (Completado)**: `dsl/` (parser *recursive descent* manual, declaraciones `segment`/`class`/`rule`, diagnósticos con `Span`, tokenizador *maximal munch* con marcas de acento `ˈ`/`ˌ`).
 - **Hito 3 (Completado)**: Árbol de dialectos y etapas cronológicas (`DialectTree`, bloques `stage` en DSL), modos direccionales (`LeftToRight`, `RightToLeft`) y contextos no locales (`ZeroOrMore`). Incluye las correcciones de la revisión de los Hitos 0–3: herencia de acento en reemplazos literales, validación de `#` y de inserciones, errores con contexto de regla y etapa, acento en el formato espaciado y diagnósticos del DSL.
 - **Hito 4 (Completado)**: CLI con `clap` (`run`, `trace`, `compare`), `Word::to_compact` y exportación determinista a texto plano, Markdown y JSON (serializado a mano, sin `serde`).
+- **Hito 5 (En curso)**: Expresividad fonológica — restricciones y mutaciones de acento (`StressMatch`, `StressUpdate`, `LiteralStress`), variables de asimilación/disimilación $\alpha$, entornos múltiples (`|`) y elementos opcionales (`(X)`), más gramáticas históricas reales en `examples/` verificadas por integración.
+- **Hito 6 (Planificado)**: Reconstrucción comparativa — alineamiento determinista de cognados por distancia sobre `FeatureBundle`, extracción de tablas de correspondencias sonoras regulares y verificación de protoformas contra un `DialectTree`.
 
 ## Lenguaje DSL y tokenizador maximal munch (`src/dsl/`)
 
@@ -177,7 +199,7 @@ Adicionalmente, `Program::validate_against(&self, inventory: &Inventory) -> Resu
 - Entrada en UTF-8 NFC. Un BOM UTF-8 (U+FEFF) al inicio de la fuente se ignora: los offsets en bytes de `Span` siguen contando desde el inicio real del texto, y la columna del primer carácter es 1.
 - Comentarios de línea con `//` hasta el final de la línea (no usar `#`, que representa `ContextElement::WordBoundary`).
 - Palabras reservadas de inicio de declaración: `segment`, `class`, `rule`, `stage` (`from` es palabra clave contextual en la cabecera de `stage`).
-- Símbolos fonológicos e identificadores sin comillas: secuencias Unicode sin espacios que no contengan operadores ni delimitadores del DSL (`{ } [ ] ( ) , : = > / _ # * + - $ " ;`). Se permiten `-` y `_` internos en identificadores/rasgos compuestos (`mid-high`, `mid-low`, `left-to-right`, `right-to-left`, `final_m_loss`), mientras que un `-` inicial siempre se tokeniza como signo negativo y un `_` inicial o aislado siempre se tokeniza como marcador de foco del contexto (`_`).
+- Símbolos fonológicos e identificadores sin comillas: secuencias Unicode sin espacios que no contengan operadores ni delimitadores del DSL (`{ } [ ] ( ) , : = > / _ # * + - $ | " ;`). Se permiten `-` y `_` internos en identificadores/rasgos compuestos (`mid-high`, `mid-low`, `left-to-right`, `right-to-left`, `final_m_loss`), mientras que un `-` inicial siempre se tokeniza como signo negativo y un `_` inicial o aislado siempre se tokeniza como marcador de foco del contexto (`_`). `|` se tokeniza como `TokenKind::Pipe` para separar entornos alternativos.
 - Literales entre comillas dobles `"..."` para nombres legibles de reglas, con soporte de escapes `\"` y `\\`.
 
 ### Declaración de inventario (`segment`)
@@ -208,30 +230,41 @@ La misma sintaxis de lista de rasgos separada por comas se aplica en `segment`, 
   - `Height`: `high`, `mid-high`, `mid-low`, `low` (forma corta `mid-high` / `+mid-high` o `height=mid-high`).
   - `Backness`: `front`, `central`, `back` (forma corta `front` / `+front` o `backness=front`).
 - **Ausencia / limpieza de dimensiones opcionales**: `-place` / `place=none`, `-height` / `height=none`, `-backness` / `backness=none` (mapean a `FieldMatch::IsNone` en patrones, `FieldUpdate::Clear` en mutaciones, y `None` en `segment`).
-- **Validaciones**: rechazar `-manner` / `manner=none`, la negación de variantes enumeradas (`-stop`, `-velar`, etc.) y campos repetidos dentro del mismo `[...]`.
+- **Acento prosódico (Hito 5, solo en patrones, mutaciones y literales de regla)**:
+  - En `segment`, cualquier especificación de acento se rechaza con `DslErrorKind::StressInSegmentDecl`.
+  - En patrones (`target` y contextos): `+stressed` (`StressMatch::Stressed`), `-stressed` / `stress=unstressed` (`StressMatch::Is(Stress::Unstressed)`), `stress=primary` (`StressMatch::Is(Stress::Primary)`), `stress=secondary` (`StressMatch::Is(Stress::Secondary)`).
+  - En mutaciones (`[...]` y `$k[...]`) y sufijos de literales de reemplazo (`e[...]`): `+stressed` / `stress=primary` (`StressUpdate::Set(Stress::Primary)`), `-stressed` / `stress=unstressed` (`StressUpdate::Set(Stress::Unstressed)`), `stress=secondary` (`StressUpdate::Set(Stress::Secondary)`).
+- **Variables $\alpha$ de asimilación/disimilación (Hito 5, solo en reglas)**:
+  - En `segment`, cualquier variable se rechaza con `DslErrorKind::VariableInSegmentDecl`.
+  - **Notación griega prefija**: una letra griega minúscula (`α`..`ω`) inmediatamente pegada al nombre del campo (`αplace`, `αbackness`, `αvoiced`, `+αvoiced`, `-αvoiced`, `αstress`).
+  - **Notación explícita `campo=var`**: acepta letras griegas minúsculas (`place=α`, `voiced=-α`) y nombres ASCII prefijados con `@` (`place=@p`, `voiced=-@v`, donde `@` va seguido de uno o más caracteres ASCII alfanuméricos o `_`).
+  - La polaridad negativa (`-α...` / `=-α` / `=-@v`) es válida únicamente sobre campos booleanos (`voiced`, `aspirated`, `palatalized`, `labialized`, `rounded`, `syllabic`, `long`); en cualquier otro campo devuelve un diagnóstico `InvalidFeatureValue`.
+- **Validaciones**: rechazar `-manner` / `manner=none`, la negación de variantes enumeradas (`-stop`, `-velar`, etc.) y campos repetidos dentro del mismo `[...]` (incluyendo concreto + variable o múltiples variables sobre el mismo campo).
 
 ### Declaración de reglas (`rule`)
 ```text
 rule <id> ["<nombre>"] [(simultaneous | left-to-right | right-to-left)]:
-  <target> > <replacement> [/ <left_context> _ <right_context>]
+  <target> > <replacement> [/ <left_context> _ <right_context> [| <left_2> _ <right_2> ...]]
 ```
-- Tras `:`, se permiten saltos de línea y comentarios opcionales; el cuerpo de la regla ocupa una única línea lógica (terminada por salto de línea o EOF).
+- Tras `:`, se permiten saltos de línea y comentarios opcionales; los entornos alternativos separados por `|` también admiten saltos de línea opcionales antes o después de `|` para alinear ramas largas, mientras que cada rama permanece en una única línea lógica.
 - Si se omite `"<nombre>"`, `name` toma el valor de `id`. Si se omite el modo, se usa `ApplicationMode::Simultaneous`.
 - **Vacío en `target` o `replacement`**: `∅` (U+2205) o alias ASCII `0` (epéntesis $0 \to M$ y borrado $N \to 0$).
 - **Patrones en `target` y contextos**:
   - Un identificador que coincide con una `class` declarada previamente se resuelve como `Pattern::Class`; en caso contrario, como `Pattern::Literal`.
-  - Un bloque `[...]` se resuelve como `Pattern::Features(FeaturePattern)`.
+  - Un bloque `[...]` se resuelve como `Pattern::Features(FeaturePattern)` (o `Pattern::Constrained` si incluye acento o variables $\alpha$).
+  - Sufijo `[...]` adyacente (sin espacio) tras un identificador literal o clase (`V[+stressed]`, `ɛ[+stressed]`, `N[αplace]`): produce `Pattern::Constrained` manteniendo el literal o clase como `base` y aplicando únicamente restricciones de acento y/o variables $\alpha$. Incluir rasgos intrínsecos de `FeatureBundle` en este sufijo se rechaza con `DslErrorKind::FeaturesOnNonFeaturePattern`.
 - **Reemplazos ($N \to M$)**:
   - Un símbolo literal produce `ReplacementItem::Literal` (usar el nombre de una `class` en `replacement` es error).
-  - Mutación implícita `[...]`: permitida únicamente cuando `target.len() == 1` (`source_index: 0`); si `target.len() != 1`, produce error de ambigüedad.
+  - Un símbolo literal con sufijo `[...]` adyacente (sin espacio, p. ej. `e[+stressed]`, `j[-stressed]`, `e[stress=secondary]`, `e[αstress]`) produce `ReplacementItem::LiteralWithStress`. Solo admite acento o variable de dominio `Stress`; incluir rasgos intrínsecos de `FeatureBundle` se rechaza con `DslErrorKind::FeaturesOnLiteralReplacement`.
+  - Mutación implícita `[...]`: permitida únicamente cuando `target.len() == 1` (`source_index: 0`); si `target.len() != 1`, produce error de ambigüedad. Admite rasgos, acento y variables $\alpha$ mediante `SegmentMutation`.
   - Referencia indexada 1-based `$1`, `$2`, ... (mapeada a `source_index = k - 1`):
-    - `$k` sin corchetes equivale a `ReplacementItem::Mutate { source_index: k - 1, mutation: FeatureMutation::new() }` (copia el segmento preservando su `stress`).
-    - `$k[...]` sin espacio entre `$k` y `[` aplica la mutación especificada al segmento `k - 1` (si hay espacio entre `$k` y `[`, se interpretan como dos ítems distintos).
+    - `$k` sin corchetes equivale a `ReplacementItem::Mutate { source_index: k - 1, mutation: SegmentMutation::default() }` (copia el segmento preservando su `stress`).
+    - `$k[...]` sin espacio entre `$k` y `[` aplica la `SegmentMutation` especificada al segmento `k - 1` (si hay espacio entre `$k` y `[`, se interpretan como dos ítems distintos).
     - `$0` o `$k > target.len()` producen error de diagnóstico.
-- **Contexto (`/ <left_context> _ <right_context>`)**:
-  - Opcional; si aparece `/`, exige exactamente un `_`. Si no hay un `_` aislado pero algún identificador del contexto contiene `_` (p. ej. `V_V`, que se lexea como un solo identificador), el error es `DslErrorKind::FocusInsideIdentifier(String)` en lugar de `MissingContextFocus`, para sugerir separar el foco con espacios (`V _ V`).
-  - Soporta `#` (`ContextElement::WordBoundary`), `<patrón>` (`ContextElement::Segment`) y `<patrón>*` (`ContextElement::ZeroOrMore`). Un `#` fuera del borde exterior se rechaza con `RuleError::MisplacedWordBoundary`.
-- **Validaciones finales**: rechazar IDs de regla duplicados en el mismo ámbito (nivel superior o misma etapa `stage`); cada regla se construye mediante `Rule::new` (propagando `RuleError` envuelto en `DslError` con el `Span` de la regla).
+- **Contexto (`/ <left_context> _ <right_context> [| ...]`)**:
+  - Opcional; si aparece `/`, exige al menos una rama y exactamente un `_` en cada rama. Si una rama no tiene un `_` aislado pero algún identificador del contexto contiene `_` (p. ej. `V_V`, que se lexea como un solo identificador), el error es `DslErrorKind::FocusInsideIdentifier(String)` en lugar de `MissingContextFocus`, para sugerir separar el foco con espacios (`V _ V`).
+  - Soporta `#` (`ContextElement::WordBoundary`), `<patrón>` (`ContextElement::Segment`), `<patrón>*` (`ContextElement::ZeroOrMore`) y `(<patrón>)` (`ContextElement::Optional`, exactamente un patrón dentro de los paréntesis; rechaza `(#)` y `(<patrón>)*`). Un `#` fuera del borde exterior de cualquier rama se rechaza con `RuleError::MisplacedWordBoundary`.
+- **Validaciones finales**: rechazar IDs de regla duplicados en el mismo ámbito (nivel superior o misma etapa `stage`); cada regla se construye mediante `Rule::with_environments` (propagando `RuleError` envuelto en `DslError` con el `Span` de la regla).
 
 ### Declaración de etapas y árbol de dialectos (`stage`)
 ```text
@@ -322,6 +355,21 @@ stage ionic "Ionic Greek" from proto_greek {
 }
 ```
 
+### Ejemplo de extensiones en DSL (Hito 5)
+```text
+// Diptongación sensible al acento con preservación de foco prosódico
+rule open_mid_diphthongization:
+  ɛ[+stressed] > j e[+stressed]
+
+// Asimilación nasal homorgánica de punto de articulación con variable α
+rule nasal_place_assimilation:
+  [nasal] > [αplace] / _ [stop, αplace]
+
+// Síncopa / debilitamiento con entornos múltiples y elemento opcional
+rule unstressed_syncope:
+  V[-stressed] > ∅ / C (r) _ C V | V C _ C #
+```
+
 ## Interfaz CLI y formatos de exportación (`src/cli/`)
 
 ### Dependencias y arquitectura
@@ -329,7 +377,7 @@ stage ionic "Ionic Greek" from proto_greek {
 - `src/phonology/`, `src/engine/` y `src/dsl/` siguen siendo 100 % `std`-only y nunca importan `clap`.
 - `src/cli/` vive como módulo del binario (`mod cli;` en `src/main.rs`) para que la librería (`src/lib.rs`) no exponga tipos de `clap`.
 - Los lints de `Cargo.toml` (`unsafe_code = "forbid"`, `unwrap_used = "deny"`, `expect_used = "deny"`, `panic = "deny"`) aplican también a `src/cli/` y `src/main.rs`.
-- Submódulos previstos en `src/cli/`:
+- Submódulos en `src/cli/`:
   - `args.rs`: definición de comandos y flags con `clap::Parser` / `clap::Subcommand` / `clap::ValueEnum`.
   - `error.rs`: enum `CliError` que implementa `Display` y `std::error::Error`.
   - `format.rs`: formateadores puros para `text`, `markdown` y JSON RFC 8259 determinista escrito a mano (sin `serde` ni `serde_json`).
