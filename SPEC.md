@@ -157,7 +157,7 @@ tests/
 - **Hito 1 (Completado)**: `phonology/` + `engine/` + `tests/golden_mvp.rs` pasando.
 - **Hito 2 (Completado)**: `dsl/` (parser *recursive descent* manual, declaraciones `segment`/`class`/`rule`, diagnósticos con `Span`, tokenizador *maximal munch* con marcas de acento `ˈ`/`ˌ`).
 - **Hito 3 (Completado)**: Árbol de dialectos y etapas cronológicas (`DialectTree`, bloques `stage` en DSL), modos direccionales (`LeftToRight`, `RightToLeft`) y contextos no locales (`ZeroOrMore`). Incluye las correcciones de la revisión de los Hitos 0–3: herencia de acento en reemplazos literales, validación de `#` y de inserciones, errores con contexto de regla y etapa, acento en el formato espaciado y diagnósticos del DSL.
-- **Hito 4 (Actual)**: CLI con `clap` (`run`, `trace`, `compare`), `Word::to_compact` y exportación determinista a texto plano, Markdown y JSON (serializado a mano, sin `serde`).
+- **Hito 4 (Completado)**: CLI con `clap` (`run`, `trace`, `compare`), `Word::to_compact` y exportación determinista a texto plano, Markdown y JSON (serializado a mano, sin `serde`).
 
 ## Lenguaje DSL y tokenizador maximal munch (`src/dsl/`)
 
