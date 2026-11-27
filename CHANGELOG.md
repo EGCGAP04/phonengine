@@ -26,6 +26,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- Milestone 4 CLI and export formats (`src/cli/`, `src/main.rs`, `tests/cli.rs`):
+  - `clap` (`derive`) binary interface with `run`, `trace`, and `compare` subcommands, supporting positional words, `--words <PATH>`, `stdin` input, rules from `-`, `--spaced`, `--stage`, `--stages`, `-f <text|markdown|json>`, and `-o <PATH>`.
+  - Deterministic hand-written RFC 8259 JSON formatter, GFM Markdown tables, and column-aligned plain-text comparison tables in `src/cli/format.rs` (zero `serde` dependencies).
+  - `CliError` with `Display`/`Error` diagnostics and distinct exit codes (`0`, `1`, `2`).
+  - `Word::to_compact` in `src/phonology/segment.rs` for stress-preserving compact rendering consistent with `tokenize_word`.
 - `Stress::ipa_marker` and `Stress::from_ipa_marker`, shared by the tokenizer and the spaced word format.
 - `DslErrorKind::ClassUsedBeforeDeclaration` and `DslErrorKind::FocusInsideIdentifier`.
 - `RuleError::MisplacedWordBoundary`, `DialectError::DuplicateRuleId`, and `EngineError::StageFailed`.

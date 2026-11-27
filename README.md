@@ -22,6 +22,20 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+### CLI usage
+
+```bash
+# Derive words through flat rules or a target dialect stage
+cargo run -- run rules.phon vitam fatam
+cargo run -- run greek.phon --stage attic -f json -w words.txt
+
+# Trace every non-vacuous step (supports --spaced and Markdown export)
+cargo run -- trace rules.phon --spaced -f markdown "v i t a m"
+
+# Compare outcomes across leaf dialects or explicit stages
+cargo run -- compare greek.phon --stages attic,ionic pʰˈaːtʰi
+```
+
 ## Project structure
 
 ```text
@@ -51,6 +65,11 @@ cargo test
 ├── SPEC.md
 ├── clippy.toml
 ├── src/
+│   ├── cli/
+│   │   ├── args.rs
+│   │   ├── error.rs
+│   │   ├── format.rs
+│   │   └── mod.rs
 │   ├── dsl/
 │   │   ├── error.rs
 │   │   ├── lexer.rs
@@ -73,6 +92,7 @@ cargo test
 │       ├── pattern.rs
 │       └── segment.rs
 └── tests/
+    ├── cli.rs
     ├── dialect_tree.rs
     ├── dsl_mvp.rs
     ├── fixtures/
@@ -86,7 +106,7 @@ cargo test
 - [x] **M1**: Core phonology (`src/phonology/`) and rule engine (`src/engine/`) with golden MVP tests.
 - [x] **M2**: DSL lexer/parser (`src/dsl/`) and maximal-munch tokenizer.
 - [x] **M3**: Dialect trees, chronological stages, directional modes, and non-local contexts.
-- [ ] **M4**: CLI (`src/cli/`) with `clap` and Markdown/JSON export.
+- [x] **M4**: CLI (`src/cli/`) with `clap` and Markdown/JSON export.
 
 ## License
 

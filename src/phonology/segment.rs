@@ -108,13 +108,32 @@ impl Word {
             if idx > 0 {
                 out.push(' ');
             }
-            if let Some(marker) = seg.stress.ipa_marker() {
-                out.push(marker);
-            }
-            out.push_str(&seg.symbol);
+            push_segment(&mut out, seg);
         }
         out
     }
+
+    /// Formats the word by concatenating segment symbols without spaces, prefixing stressed
+    /// segments with their IPA marker (`ˈ` primary, `ˌ` secondary), e.g. `tekʰˈeːs`.
+    ///
+    /// When no stress marker is registered as an inventory symbol and the inventory has no
+    /// maximal-munch ambiguity, [`crate::dsl::tokenize_word`] reads the output back into an equal
+    /// word.
+    #[must_use]
+    pub fn to_compact(&self) -> String {
+        let mut out = String::new();
+        for seg in &self.segments {
+            push_segment(&mut out, seg);
+        }
+        out
+    }
+}
+
+fn push_segment(out: &mut String, seg: &Segment) {
+    if let Some(marker) = seg.stress.ipa_marker() {
+        out.push(marker);
+    }
+    out.push_str(&seg.symbol);
 }
 
 /// Resolves one token of the spaced format, accepting an optional leading stress marker.
@@ -253,6 +272,45 @@ mod tests {
         let unstressed = inv.segment("a", Stress::Unstressed)?;
         assert_eq!(stressed.bundle, unstressed.bundle);
         assert_ne!(stressed, unstressed);
+        Ok(())
+    }
+
+    #[test]
+    fn compact_format_renders_concatenated_symbols_and_round_trips_with_tokenizer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut inv = sample_inventory()?;
+        inv.insert(
+            "eː",
+            FeatureBundle::vowel(Height::MidHigh, crate::phonology::Backness::Front, false)
+                .with_long(true),
+        )?;
+        inv.insert(
+            "kʰ",
+            FeatureBundle::consonant(Manner::Stop, Place::Velar, false).with_aspirated(true),
+        )?;
+        inv.insert(
+            "s",
+            FeatureBundle::consonant(Manner::Fricative, Place::Alveolar, false),
+        )?;
+
+        assert_eq!(Word::default().to_compact(), "");
+
+        let unstressed = Word::from_spaced("p a t a", &inv)?;
+        assert_eq!(unstressed.to_compact(), "pata");
+
+        let stressed = Word::new(vec![
+            inv.segment("t", Stress::Unstressed)?,
+            inv.segment("eː", Stress::Unstressed)?,
+            inv.segment("kʰ", Stress::Unstressed)?,
+            inv.segment("eː", Stress::Primary)?,
+            inv.segment("s", Stress::Unstressed)?,
+            inv.segment("a", Stress::Secondary)?,
+        ]);
+        assert_eq!(stressed.to_compact(), "teːkʰˈeːsˌa");
+        assert_eq!(
+            crate::dsl::tokenize_word(&stressed.to_compact(), &inv)?,
+            stressed
+        );
         Ok(())
     }
 }
