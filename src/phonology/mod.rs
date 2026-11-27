@@ -7,5 +7,8 @@ pub mod segment;
 
 pub use features::{Backness, FeatureBundle, Height, Manner, Place, Stress};
 pub use inventory::{Inventory, InventoryError};
-pub use pattern::{FeatureMutation, FeaturePattern, FieldMatch, FieldUpdate};
+pub use pattern::{
+    FeatureDomain, FeatureField, FeatureMutation, FeaturePattern, FeatureVar, FeatureVarValue,
+    FieldMatch, FieldUpdate, LiteralStress, StressMatch, StressUpdate, VarBindings, VarPolarity,
+};
 pub use segment::{Segment, Word};

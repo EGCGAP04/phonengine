@@ -135,7 +135,7 @@ fn mvp_rules() -> Result<Vec<Rule>, RuleError> {
         )],
         vec![ReplacementItem::Mutate {
             source_index: 0,
-            mutation: FeatureMutation::new().set_voiced(true),
+            mutation: FeatureMutation::new().set_voiced(true).into(),
         }],
         vec![vowel_ctx.clone()],
         vec![vowel_ctx.clone()],

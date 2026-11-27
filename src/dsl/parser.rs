@@ -865,7 +865,7 @@ impl Parser {
                     };
                     items.push(ReplacementItem::Mutate {
                         source_index: reference - 1,
-                        mutation,
+                        mutation: mutation.into(),
                     });
                     combined_span = Some(match combined_span {
                         Some(prev) => prev.merge(item_span),
@@ -885,7 +885,7 @@ impl Parser {
                     let (mutation, mut_span) = self.parse_feature_mutation(false)?;
                     items.push(ReplacementItem::Mutate {
                         source_index: 0,
-                        mutation,
+                        mutation: mutation.into(),
                     });
                     combined_span = Some(match combined_span {
                         Some(prev) => prev.merge(mut_span),
@@ -1510,11 +1510,11 @@ mod tests {
             &[
                 ReplacementItem::Mutate {
                     source_index: 1,
-                    mutation: FeatureMutation::new(),
+                    mutation: FeatureMutation::new().into(),
                 },
                 ReplacementItem::Mutate {
                     source_index: 0,
-                    mutation: FeatureMutation::new(),
+                    mutation: FeatureMutation::new().into(),
                 },
             ]
         );
@@ -1522,7 +1522,7 @@ mod tests {
             program.rules[3].replacement(),
             &[ReplacementItem::Mutate {
                 source_index: 0,
-                mutation: FeatureMutation::new().set_long(true),
+                mutation: FeatureMutation::new().set_long(true).into(),
             }]
         );
         assert!(program.rules[4].target().is_empty());
