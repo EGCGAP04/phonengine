@@ -1,0 +1,159 @@
+// Classical Latin to Romance phonological evolution
+// Models: classical_latin -> vulgar_latin -> { italian, western_romance -> { spanish, french } }
+// Exercises M5 stress constraints/mutations, alpha variables, multi-context `|`, and optional `(X)` contexts.
+
+// --- Segment Inventory (32 segments, strictly bijective) ---
+
+// Vowels (14)
+segment a  = [vowel, low, central]
+segment aː = [vowel, low, central, +long]
+segment e  = [vowel, mid-high, front]
+segment eː = [vowel, mid-high, front, +long]
+segment ɛ  = [vowel, mid-low, front]
+segment i  = [vowel, high, front]
+segment iː = [vowel, high, front, +long]
+segment o  = [vowel, mid-high, back, +rounded]
+segment oː = [vowel, mid-high, back, +rounded, +long]
+segment ɔ  = [vowel, mid-low, back, +rounded]
+segment u  = [vowel, high, back, +rounded]
+segment uː = [vowel, high, back, +rounded, +long]
+segment y  = [vowel, high, front, +rounded]
+segment ə  = [vowel, mid-high, central]
+
+// Consonants (18)
+segment p = [stop, bilabial, -voiced]
+segment b = [stop, bilabial, +voiced]
+segment t = [stop, alveolar, -voiced]
+segment d = [stop, alveolar, +voiced]
+segment k = [stop, velar, -voiced]
+segment g = [stop, velar, +voiced]
+
+segment f = [fricative, labiodental, -voiced]
+segment v = [fricative, labiodental, +voiced]
+segment s = [fricative, alveolar, -voiced]
+segment z = [fricative, alveolar, +voiced]
+segment h = [fricative, glottal, -voiced]
+
+segment m = [nasal, bilabial, +voiced]
+segment n = [nasal, alveolar, +voiced]
+segment ŋ = [nasal, velar, +voiced]
+
+segment l = [lateral, alveolar, +voiced]
+segment r = [rhotic, alveolar, +voiced]
+
+segment j = [approximant, palatal, +voiced]
+segment w = [approximant, velar, +voiced, +labialized]
+
+// --- Natural Classes ---
+
+class V     = { a, aː, e, eː, ɛ, i, iː, o, oː, ɔ, u, uː, y, ə }
+class C     = { p, b, t, d, k, g, f, v, s, z, h, m, n, ŋ, l, r, j, w }
+class O     = { p, b, t, d, k, g, f, v }
+class L     = { l, r }
+class ApocV = { e, i, o, u }
+
+// --- Dialect Tree ---
+
+stage classical_latin "Classical Latin" {}
+
+stage vulgar_latin "Vulgar Latin" from classical_latin {
+  rule final_m_loss "Final -m deletion":
+    m > ∅ / _ #
+
+  rule h_loss "Loss of /h/":
+    h > ∅
+
+  rule short_e_opening "Short /e/ opening":
+    e > ɛ
+
+  rule short_o_opening "Short /o/ opening":
+    o > ɔ
+
+  rule short_i_lowering "Short /i/ lowering":
+    i > e
+
+  rule short_u_lowering "Short /u/ lowering":
+    u > o
+
+  rule vowel_shortening "Loss of phonemic vowel length":
+    [vowel, +long] > [-long]
+
+  rule intertonic_syncope "Unstressed intertonic syncope":
+    V[-stressed] > ∅ / V[+stressed] (L) C _ C V
+
+  rule unstressed_mid_raising "Neutralization of unstressed open-mid vowels":
+    [vowel, mid-low, -stressed] > [mid-high]
+
+  rule nasal_place_assim "Homorganic nasal place assimilation":
+    [nasal] > [αplace] / _ [stop, αplace]
+}
+
+stage italian "Italian" from vulgar_latin {
+  rule open_e_diph "Italian open-syllable /ɛ/ diphthongization":
+    ɛ[+stressed] > j ɛ[+stressed] / _ C V |
+                                    _ O L V
+
+  rule open_o_diph "Italian open-syllable /ɔ/ diphthongization":
+    ɔ[+stressed] > w ɔ[+stressed] / _ C V |
+                                    _ O L V
+
+  rule stop_cluster_assim "Regressive stop cluster assimilation":
+    [stop] > [αplace, βvoiced] / _ [stop, αplace, βvoiced]
+}
+
+stage western_romance "Proto-Western Romance" from vulgar_latin {
+  rule s_cluster_prothesis "Prosthetic /e/ before word-initial s+C":
+    ∅ > e / # _ s C
+
+  rule intervocalic_voicing "Intervocalic stop voicing":
+    [stop, -voiced] > [+voiced] / V _ (L) V
+}
+
+stage spanish "Spanish" from western_romance {
+  rule spanish_e_diph "Spanish /ɛ/ diphthongization":
+    ɛ[+stressed] > j e[+stressed]
+
+  rule spanish_o_diph "Spanish /ɔ/ diphthongization":
+    ɔ[+stressed] > w e[+stressed]
+
+  rule initial_f_aspiration "Initial /f/ aspiration before vowel":
+    f > h / # _ V
+
+  rule pt_simplification "Simplification of /pt/ cluster":
+    p > ∅ / _ t
+}
+
+stage french "French" from western_romance {
+  rule u_fronting "French /u/ fronting":
+    [vowel, high, back, +rounded] > [front]
+
+  rule preconsonantal_s_loss "Loss of /s/ before consonant":
+    s > ∅ / _ C
+
+  // Must precede pt_simplification so closed-syllable sˈɛpte stays sˈɛt rather than *sjˈɛt.
+  rule open_e_diph "French open-syllable /ɛ/ diphthongization":
+    ɛ[+stressed] > j ɛ[+stressed] / _ C V |
+                                    _ O L V
+
+  rule pt_simplification "Simplification of /pt/ cluster":
+    p > ∅ / _ t
+
+  rule tonic_free_a_raising "Tonic open-syllable /a/ raising":
+    a[+stressed] > e[+stressed] / _ C V
+
+  rule intervocalic_dental_loss "Loss of intervocalic and pre-rhotic /d/":
+    d > ∅ / V _ V |
+            V _ r
+
+  rule final_a_reduction "Final unstressed /a/ reduction to schwa":
+    a[-stressed] > ə / _ #
+
+  rule final_support_vowel "Supporting schwa after obstruent+liquid cluster":
+    ApocV[-stressed] > ə / O L _ #
+
+  rule final_vowel_apocope "Final unstressed vowel apocope":
+    ApocV[-stressed] > ∅ / _ #
+
+  rule final_obstruent_devoicing "Word-final stop devoicing":
+    [stop, +voiced] > [-voiced] / _ #
+}
