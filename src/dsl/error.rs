@@ -87,6 +87,15 @@ pub enum DslErrorKind {
     },
     /// Repeated the same feature field inside a single `[...]` block.
     DuplicateFeature(String),
+    /// Specified prosodic stress inside a `segment` inventory declaration.
+    StressInSegmentDecl,
+    /// Used an alpha feature variable inside a `segment` inventory declaration.
+    VariableInSegmentDecl(String),
+    /// Attached intrinsic bundle features (beyond stress and alpha variables) as a `[...]`
+    /// modifier on a literal or natural class pattern.
+    FeaturesOnNonFeaturePattern,
+    /// Attached non-stress features to a literal replacement's `[...]` suffix.
+    FeaturesOnLiteralReplacement,
     /// Declared a `segment` without specifying its required `manner`.
     MissingManner {
         /// Segment symbol missing a manner feature.
@@ -164,6 +173,21 @@ impl fmt::Display for DslErrorKind {
             Self::DuplicateFeature(field) => {
                 write!(f, "duplicate feature {field:?} in feature block")
             }
+            Self::StressInSegmentDecl => {
+                f.write_str("prosodic stress cannot be specified in a 'segment' declaration")
+            }
+            Self::VariableInSegmentDecl(var) => {
+                write!(
+                    f,
+                    "alpha variable {var:?} cannot be used in a 'segment' declaration"
+                )
+            }
+            Self::FeaturesOnNonFeaturePattern => f.write_str(
+                "intrinsic phonological features cannot be attached to a literal or natural class pattern (only stress and alpha variables are allowed)",
+            ),
+            Self::FeaturesOnLiteralReplacement => f.write_str(
+                "literal replacement '[...]' suffix only accepts prosodic stress or a stress alpha variable",
+            ),
             Self::MissingManner { symbol } => {
                 write!(f, "segment {symbol:?} must specify a manner feature")
             }
@@ -365,6 +389,10 @@ mod tests {
         for kind in [
             DslErrorKind::FocusInsideIdentifier("V_V".to_owned()),
             DslErrorKind::ClassUsedBeforeDeclaration("W".to_owned()),
+            DslErrorKind::StressInSegmentDecl,
+            DslErrorKind::VariableInSegmentDecl("α".to_owned()),
+            DslErrorKind::FeaturesOnNonFeaturePattern,
+            DslErrorKind::FeaturesOnLiteralReplacement,
         ] {
             let err = DslError::new(kind, span);
             assert!(err.to_string().starts_with("3:5: "));
