@@ -4,12 +4,13 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::engine::{
-    ApplicationMode, ContextElement, DialectError, DialectNode, DialectTree, NaturalClass, Pattern,
-    ReplacementItem, Rule,
+    ApplicationMode, ConstrainedPattern, ContextElement, DialectError, DialectNode, DialectTree,
+    Environment, NaturalClass, Pattern, PatternBase, ReplacementItem, Rule, SegmentMutation,
 };
 use crate::phonology::{
-    Backness, FeatureBundle, FeatureMutation, FeaturePattern, FieldMatch, FieldUpdate, Height,
-    Inventory, Manner, Place,
+    Backness, FeatureBundle, FeatureField, FeatureMutation, FeaturePattern, FeatureVar, FieldMatch,
+    FieldUpdate, Height, Inventory, LiteralStress, Manner, Place, Stress, StressMatch,
+    StressUpdate, VarPolarity,
 };
 
 use super::error::{DslError, DslErrorKind, Span};
@@ -94,48 +95,41 @@ pub fn parse_program(source: &str) -> Result<Program, DslError> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FeatureField {
-    Manner,
-    Place,
-    Height,
-    Backness,
-    Voiced,
-    Aspirated,
-    Palatalized,
-    Labialized,
-    Rounded,
-    Syllabic,
-    Long,
+enum ParsedStress {
+    /// `+stressed`: matches `Primary | Secondary`; sets `Primary` in mutations/literals.
+    StressedFlag,
+    /// `stress=unstressed|primary|secondary` or `-stressed`.
+    Exact(Stress),
 }
 
-impl FeatureField {
-    const fn name(self) -> &'static str {
+impl ParsedStress {
+    const fn to_match(self) -> StressMatch {
         match self {
-            Self::Manner => "manner",
-            Self::Place => "place",
-            Self::Height => "height",
-            Self::Backness => "backness",
-            Self::Voiced => "voiced",
-            Self::Aspirated => "aspirated",
-            Self::Palatalized => "palatalized",
-            Self::Labialized => "labialized",
-            Self::Rounded => "rounded",
-            Self::Syllabic => "syllabic",
-            Self::Long => "long",
+            Self::StressedFlag => StressMatch::Stressed,
+            Self::Exact(level) => StressMatch::Is(level),
+        }
+    }
+
+    const fn to_stress(self) -> Stress {
+        match self {
+            Self::StressedFlag => Stress::Primary,
+            Self::Exact(level) => level,
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FeatureValue {
     Manner(Manner),
     Place(Option<Place>),
     Height(Option<Height>),
     Backness(Option<Backness>),
     Bool(bool),
+    Stress(ParsedStress),
+    Var { name: String, polarity: VarPolarity },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct FeatureEntry {
     field: FeatureField,
     value: FeatureValue,
@@ -253,6 +247,46 @@ fn parse_bool_field(name: &str) -> Option<FeatureField> {
     }
 }
 
+fn parse_field_name(name: &str) -> Option<FeatureField> {
+    match name {
+        "manner" => Some(FeatureField::Manner),
+        "place" => Some(FeatureField::Place),
+        "height" => Some(FeatureField::Height),
+        "backness" => Some(FeatureField::Backness),
+        "stress" => Some(FeatureField::Stress),
+        other => parse_bool_field(other),
+    }
+}
+
+fn is_greek_var_char(ch: char) -> bool {
+    ('\u{03B1}'..='\u{03C9}').contains(&ch)
+}
+
+fn parse_explicit_var_name(raw: &str) -> Option<String> {
+    let mut chars = raw.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) if is_greek_var_char(ch) => Some(raw.to_owned()),
+        _ => raw.strip_prefix('@').and_then(|rest| {
+            (!rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+                .then(|| raw.to_owned())
+        }),
+    }
+}
+
+fn parse_prefixed_greek_var(ident: &str) -> Option<(String, FeatureField)> {
+    let mut chars = ident.chars();
+    let first = chars.next()?;
+    if !is_greek_var_char(first) {
+        return None;
+    }
+    let rest = chars.as_str();
+    if rest.is_empty() {
+        return None;
+    }
+    let field = parse_field_name(rest)?;
+    Some((first.to_string(), field))
+}
+
 struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
@@ -305,6 +339,17 @@ impl Parser {
         while matches!(self.peek_kind(), TokenKind::Newline) {
             self.advance();
         }
+    }
+
+    fn peek_non_newline_kind(&self) -> &TokenKind {
+        let mut idx = self.cursor;
+        while let Some(tok) = self.tokens.get(idx) {
+            if tok.kind != TokenKind::Newline {
+                return &tok.kind;
+            }
+            idx += 1;
+        }
+        &TokenKind::Eof
     }
 
     /// Records a literal symbol reference for [`Program::validate_against`].
@@ -550,10 +595,20 @@ impl Parser {
 
         let mut manner: Option<Manner> = None;
         for entry in &entries {
-            if entry.field == FeatureField::Manner
-                && let FeatureValue::Manner(m) = entry.value
-            {
-                manner = Some(m);
+            match &entry.value {
+                FeatureValue::Stress(_) => {
+                    return Err(DslError::new(DslErrorKind::StressInSegmentDecl, entry.span));
+                }
+                FeatureValue::Var { name, .. } => {
+                    return Err(DslError::new(
+                        DslErrorKind::VariableInSegmentDecl(name.clone()),
+                        entry.span,
+                    ));
+                }
+                FeatureValue::Manner(m) if entry.field == FeatureField::Manner => {
+                    manner = Some(*m);
+                }
+                _ => {}
             }
         }
         let Some(manner) = manner else {
@@ -703,26 +758,17 @@ impl Parser {
         let (replacement, repl_span) =
             self.parse_rule_replacement(target.len(), allow_rbrace_end)?;
 
-        let (left_context, right_context, end_span) =
-            if matches!(self.peek_kind(), TokenKind::Slash) {
-                self.parse_rule_context(allow_rbrace_end)?
-            } else {
-                (Vec::new(), Vec::new(), repl_span)
-            };
+        let (environments, end_span) = if matches!(self.peek_kind(), TokenKind::Slash) {
+            self.parse_rule_contexts(allow_rbrace_end)?
+        } else {
+            (Vec::new(), repl_span)
+        };
 
         self.expect_rule_end(allow_rbrace_end)?;
 
         let rule_span = kw_span.merge(target_span).merge(end_span);
-        Rule::new(
-            id,
-            name,
-            target,
-            replacement,
-            left_context,
-            right_context,
-            mode,
-        )
-        .map_err(|err| DslError::new(DslErrorKind::InvalidRule(err), rule_span))
+        Rule::with_environments(id, name, target, replacement, environments, mode)
+            .map_err(|err| DslError::new(DslErrorKind::InvalidRule(err), rule_span))
     }
 
     fn parse_rule_target(&mut self) -> Result<(Vec<Pattern>, Span), DslError> {
@@ -807,7 +853,7 @@ impl Parser {
 
         while !matches!(
             self.peek_kind(),
-            TokenKind::Slash | TokenKind::Newline | TokenKind::Eof
+            TokenKind::Slash | TokenKind::Pipe | TokenKind::Newline | TokenKind::Eof
         ) && !(allow_rbrace_end && matches!(self.peek_kind(), TokenKind::RBrace))
         {
             let tok = self.peek().clone();
@@ -835,10 +881,26 @@ impl Parser {
                         ));
                     }
                     self.record_symbol(sym.clone(), tok.span, false);
-                    items.push(ReplacementItem::Literal(sym));
+                    let (item, item_span) = if matches!(self.peek_kind(), TokenKind::LBracket)
+                        && self.peek().span.start == tok.span.end
+                    {
+                        let (entries, bracket_span) = self.parse_feature_entries(false)?;
+                        let stress = entries_to_literal_stress(entries)?;
+                        let item = match stress {
+                            LiteralStress::Inherit => ReplacementItem::Literal(sym),
+                            other => ReplacementItem::LiteralWithStress {
+                                symbol: sym,
+                                stress: other,
+                            },
+                        };
+                        (item, tok.span.merge(bracket_span))
+                    } else {
+                        (ReplacementItem::Literal(sym), tok.span)
+                    };
+                    items.push(item);
                     combined_span = Some(match combined_span {
-                        Some(prev) => prev.merge(tok.span),
-                        None => tok.span,
+                        Some(prev) => prev.merge(item_span),
+                        None => item_span,
                     });
                 }
                 TokenKind::SourceRef(reference) => {
@@ -858,14 +920,14 @@ impl Parser {
                     let (mutation, item_span) = if matches!(self.peek_kind(), TokenKind::LBracket)
                         && self.peek().span.start == tok.span.end
                     {
-                        let (mut_spec, mut_span) = self.parse_feature_mutation(false)?;
+                        let (mut_spec, mut_span) = self.parse_segment_mutation(false)?;
                         (mut_spec, tok.span.merge(mut_span))
                     } else {
-                        (FeatureMutation::new(), tok.span)
+                        (SegmentMutation::new(), tok.span)
                     };
                     items.push(ReplacementItem::Mutate {
                         source_index: reference - 1,
-                        mutation: mutation.into(),
+                        mutation,
                     });
                     combined_span = Some(match combined_span {
                         Some(prev) => prev.merge(item_span),
@@ -882,10 +944,10 @@ impl Parser {
                             tok.span,
                         ));
                     }
-                    let (mutation, mut_span) = self.parse_feature_mutation(false)?;
+                    let (mutation, mut_span) = self.parse_segment_mutation(false)?;
                     items.push(ReplacementItem::Mutate {
                         source_index: 0,
-                        mutation: mutation.into(),
+                        mutation,
                     });
                     combined_span = Some(match combined_span {
                         Some(prev) => prev.merge(mut_span),
@@ -916,20 +978,51 @@ impl Parser {
         Ok((items, span))
     }
 
-    fn parse_rule_context(
+    fn parse_rule_contexts(
         &mut self,
         allow_rbrace_end: bool,
-    ) -> Result<(Vec<ContextElement>, Vec<ContextElement>, Span), DslError> {
-        let slash_span = self.advance().span;
+    ) -> Result<(Vec<Environment>, Span), DslError> {
+        self.advance();
+        let mut environments = Vec::new();
+        let mut last_span;
+
+        loop {
+            let (env, branch_span) = self.parse_context_branch(allow_rbrace_end)?;
+            environments.push(env);
+            last_span = branch_span;
+
+            if matches!(self.peek_kind(), TokenKind::Pipe) {
+                self.advance();
+                self.skip_newlines();
+            } else if matches!(self.peek_kind(), TokenKind::Newline)
+                && matches!(self.peek_non_newline_kind(), TokenKind::Pipe)
+            {
+                self.skip_newlines();
+                self.advance();
+                self.skip_newlines();
+            } else {
+                break;
+            }
+        }
+
+        Ok((environments, last_span))
+    }
+
+    fn parse_context_branch(
+        &mut self,
+        allow_rbrace_end: bool,
+    ) -> Result<(Environment, Span), DslError> {
         let mut left = Vec::new();
         let mut right = Vec::new();
         let mut saw_focus = false;
-        let mut last_span = slash_span;
+        let mut last_span = self.peek().span;
         // First identifier containing `_` (e.g. `V_V`), reported if no standalone focus appears.
         let mut focus_in_ident: Option<(String, Span)> = None;
 
-        while !matches!(self.peek_kind(), TokenKind::Newline | TokenKind::Eof)
-            && !(allow_rbrace_end && matches!(self.peek_kind(), TokenKind::RBrace))
+        while !matches!(
+            self.peek_kind(),
+            TokenKind::Pipe | TokenKind::Newline | TokenKind::Eof
+        ) && !(allow_rbrace_end && matches!(self.peek_kind(), TokenKind::RBrace))
         {
             let tok = self.peek().clone();
             match tok.kind {
@@ -956,6 +1049,52 @@ impl Parser {
                     dest.push(ContextElement::WordBoundary);
                     last_span = tok.span;
                 }
+                TokenKind::LParen => {
+                    let open_span = self.advance().span;
+                    let next_tok = self.peek().clone();
+                    match &next_tok.kind {
+                        TokenKind::Ident(name) => {
+                            if name.contains('_') && focus_in_ident.is_none() {
+                                focus_in_ident = Some((name.clone(), next_tok.span));
+                            }
+                        }
+                        TokenKind::LBracket => {}
+                        TokenKind::Eof => {
+                            return Err(DslError::new(
+                                DslErrorKind::UnexpectedEof {
+                                    expected: "pattern inside '(...)'".to_owned(),
+                                },
+                                next_tok.span,
+                            ));
+                        }
+                        other => {
+                            return Err(DslError::new(
+                                DslErrorKind::UnexpectedToken {
+                                    expected: "pattern inside '(...)'".to_owned(),
+                                    found: other.to_string(),
+                                },
+                                next_tok.span,
+                            ));
+                        }
+                    }
+                    let (pattern, _) = self.parse_pattern()?;
+                    let close_span = self.expect_token(&TokenKind::RParen, "')'")?;
+                    if matches!(self.peek_kind(), TokenKind::Star) {
+                        let star_span = self.advance().span;
+                        return Err(DslError::new(
+                            DslErrorKind::UnexpectedToken {
+                                expected: "context element (cannot apply '*' to optional '(...)')"
+                                    .to_owned(),
+                                found: "'*'".to_owned(),
+                            },
+                            open_span.merge(star_span),
+                        ));
+                    }
+                    let elem_span = open_span.merge(close_span);
+                    let dest = if saw_focus { &mut right } else { &mut left };
+                    dest.push(ContextElement::Optional(pattern));
+                    last_span = elem_span;
+                }
                 TokenKind::Ident(_) | TokenKind::LBracket => {
                     if let TokenKind::Ident(name) = &tok.kind
                         && name.contains('_')
@@ -980,7 +1119,8 @@ impl Parser {
                 other => {
                     return Err(DslError::new(
                         DslErrorKind::UnexpectedToken {
-                            expected: "context element ('#', pattern, or '_')".to_owned(),
+                            expected: "context element ('#', pattern, '(pattern)', or '_')"
+                                .to_owned(),
                             found: other.to_string(),
                         },
                         tok.span,
@@ -998,7 +1138,7 @@ impl Parser {
             });
         }
 
-        Ok((left, right, last_span))
+        Ok((Environment::new(left, right), last_span))
     }
 
     fn parse_pattern(&mut self) -> Result<(Pattern, Span), DslError> {
@@ -1006,16 +1146,41 @@ impl Parser {
         match tok.kind {
             TokenKind::Ident(sym) => {
                 self.advance();
-                if let Some(class) = self.classes.get(&sym) {
-                    Ok((Pattern::Class(class.clone()), tok.span))
+                let base = if let Some(class) = self.classes.get(&sym) {
+                    PatternBase::Class(class.clone())
                 } else {
                     self.record_symbol(sym.clone(), tok.span, true);
-                    Ok((Pattern::Literal(sym), tok.span))
+                    PatternBase::Literal(sym)
+                };
+
+                if matches!(self.peek_kind(), TokenKind::LBracket)
+                    && self.peek().span.start == tok.span.end
+                {
+                    let (entries, bracket_span) = self.parse_feature_entries(false)?;
+                    let (stress, vars) = entries_to_non_feature_constraints(entries)?;
+                    let pat = if stress == StressMatch::Any && vars.is_empty() {
+                        match base {
+                            PatternBase::Literal(s) => Pattern::Literal(s),
+                            PatternBase::Class(c) => Pattern::Class(c),
+                            PatternBase::Features(f) => Pattern::Features(f),
+                        }
+                    } else {
+                        Pattern::Constrained(ConstrainedPattern { base, stress, vars })
+                    };
+                    Ok((pat, tok.span.merge(bracket_span)))
+                } else {
+                    let pat = match base {
+                        PatternBase::Literal(s) => Pattern::Literal(s),
+                        PatternBase::Class(c) => Pattern::Class(c),
+                        PatternBase::Features(f) => Pattern::Features(f),
+                    };
+                    Ok((pat, tok.span))
                 }
             }
             TokenKind::LBracket => {
-                let (fp, span) = self.parse_feature_pattern(false)?;
-                Ok((Pattern::Features(fp), span))
+                let (entries, span) = self.parse_feature_entries(false)?;
+                let pat = entries_to_pattern(entries);
+                Ok((pat, span))
             }
             TokenKind::Eof => Err(DslError::new(
                 DslErrorKind::UnexpectedEof {
@@ -1033,88 +1198,65 @@ impl Parser {
         }
     }
 
-    fn parse_feature_pattern(
+    fn parse_segment_mutation(
         &mut self,
         allow_newlines: bool,
-    ) -> Result<(FeaturePattern, Span), DslError> {
+    ) -> Result<(SegmentMutation, Span), DslError> {
         let (entries, span) = self.parse_feature_entries(allow_newlines)?;
-        let mut pattern = FeaturePattern::new();
+        let mut features = FeatureMutation::new();
+        let mut stress = StressUpdate::Keep;
+        let mut vars = Vec::new();
         for entry in entries {
             match (entry.field, entry.value) {
-                (FeatureField::Manner, FeatureValue::Manner(m)) => pattern.manner = Some(m),
+                (FeatureField::Manner, FeatureValue::Manner(m)) => features.manner = Some(m),
                 (FeatureField::Place, FeatureValue::Place(Some(p))) => {
-                    pattern.place = FieldMatch::Is(p);
+                    features.place = FieldUpdate::Set(p);
                 }
                 (FeatureField::Place, FeatureValue::Place(None)) => {
-                    pattern.place = FieldMatch::IsNone;
+                    features.place = FieldUpdate::Clear;
                 }
                 (FeatureField::Height, FeatureValue::Height(Some(h))) => {
-                    pattern.height = FieldMatch::Is(h);
+                    features.height = FieldUpdate::Set(h);
                 }
                 (FeatureField::Height, FeatureValue::Height(None)) => {
-                    pattern.height = FieldMatch::IsNone;
+                    features.height = FieldUpdate::Clear;
                 }
                 (FeatureField::Backness, FeatureValue::Backness(Some(b))) => {
-                    pattern.backness = FieldMatch::Is(b);
+                    features.backness = FieldUpdate::Set(b);
                 }
                 (FeatureField::Backness, FeatureValue::Backness(None)) => {
-                    pattern.backness = FieldMatch::IsNone;
+                    features.backness = FieldUpdate::Clear;
                 }
-                (FeatureField::Voiced, FeatureValue::Bool(v)) => pattern.voiced = Some(v),
-                (FeatureField::Aspirated, FeatureValue::Bool(v)) => pattern.aspirated = Some(v),
-                (FeatureField::Palatalized, FeatureValue::Bool(v)) => pattern.palatalized = Some(v),
-                (FeatureField::Labialized, FeatureValue::Bool(v)) => pattern.labialized = Some(v),
-                (FeatureField::Rounded, FeatureValue::Bool(v)) => pattern.rounded = Some(v),
-                (FeatureField::Syllabic, FeatureValue::Bool(v)) => pattern.syllabic = Some(v),
-                (FeatureField::Long, FeatureValue::Bool(v)) => pattern.long = Some(v),
-                _ => {}
-            }
-        }
-        Ok((pattern, span))
-    }
-
-    fn parse_feature_mutation(
-        &mut self,
-        allow_newlines: bool,
-    ) -> Result<(FeatureMutation, Span), DslError> {
-        let (entries, span) = self.parse_feature_entries(allow_newlines)?;
-        let mut mutation = FeatureMutation::new();
-        for entry in entries {
-            match (entry.field, entry.value) {
-                (FeatureField::Manner, FeatureValue::Manner(m)) => mutation.manner = Some(m),
-                (FeatureField::Place, FeatureValue::Place(Some(p))) => {
-                    mutation.place = FieldUpdate::Set(p);
-                }
-                (FeatureField::Place, FeatureValue::Place(None)) => {
-                    mutation.place = FieldUpdate::Clear;
-                }
-                (FeatureField::Height, FeatureValue::Height(Some(h))) => {
-                    mutation.height = FieldUpdate::Set(h);
-                }
-                (FeatureField::Height, FeatureValue::Height(None)) => {
-                    mutation.height = FieldUpdate::Clear;
-                }
-                (FeatureField::Backness, FeatureValue::Backness(Some(b))) => {
-                    mutation.backness = FieldUpdate::Set(b);
-                }
-                (FeatureField::Backness, FeatureValue::Backness(None)) => {
-                    mutation.backness = FieldUpdate::Clear;
-                }
-                (FeatureField::Voiced, FeatureValue::Bool(v)) => mutation.voiced = Some(v),
-                (FeatureField::Aspirated, FeatureValue::Bool(v)) => mutation.aspirated = Some(v),
+                (FeatureField::Voiced, FeatureValue::Bool(v)) => features.voiced = Some(v),
+                (FeatureField::Aspirated, FeatureValue::Bool(v)) => features.aspirated = Some(v),
                 (FeatureField::Palatalized, FeatureValue::Bool(v)) => {
-                    mutation.palatalized = Some(v);
+                    features.palatalized = Some(v);
                 }
                 (FeatureField::Labialized, FeatureValue::Bool(v)) => {
-                    mutation.labialized = Some(v);
+                    features.labialized = Some(v);
                 }
-                (FeatureField::Rounded, FeatureValue::Bool(v)) => mutation.rounded = Some(v),
-                (FeatureField::Syllabic, FeatureValue::Bool(v)) => mutation.syllabic = Some(v),
-                (FeatureField::Long, FeatureValue::Bool(v)) => mutation.long = Some(v),
+                (FeatureField::Rounded, FeatureValue::Bool(v)) => features.rounded = Some(v),
+                (FeatureField::Syllabic, FeatureValue::Bool(v)) => features.syllabic = Some(v),
+                (FeatureField::Long, FeatureValue::Bool(v)) => features.long = Some(v),
+                (FeatureField::Stress, FeatureValue::Stress(ps)) => {
+                    stress = StressUpdate::Set(ps.to_stress());
+                }
+                (field, FeatureValue::Var { name, polarity }) => vars.push(FeatureVar {
+                    field,
+                    name,
+                    polarity,
+                }),
                 _ => {}
             }
         }
-        Ok((mutation, span))
+        Ok((
+            SegmentMutation {
+                features,
+                stress,
+                vars,
+            },
+            span,
+        ))
     }
 
     fn parse_feature_entries(
@@ -1166,6 +1308,13 @@ impl Parser {
                 self.advance();
                 let (name, name_span) = self.expect_ident("feature name")?;
                 let span = tok.span.merge(name_span);
+                if name == "stressed" {
+                    return Ok(FeatureEntry::new(
+                        FeatureField::Stress,
+                        FeatureValue::Stress(ParsedStress::StressedFlag),
+                        span,
+                    ));
+                }
                 if let Some(field) = parse_bool_field(&name) {
                     return Ok(FeatureEntry::new(field, FeatureValue::Bool(true), span));
                 }
@@ -1176,12 +1325,29 @@ impl Parser {
                         span,
                     ));
                 }
+                if let Some((var_name, field)) = parse_prefixed_greek_var(&name) {
+                    return Ok(FeatureEntry::new(
+                        field,
+                        FeatureValue::Var {
+                            name: var_name,
+                            polarity: VarPolarity::Same,
+                        },
+                        span,
+                    ));
+                }
                 Err(DslError::new(DslErrorKind::UnknownFeature(name), name_span))
             }
             TokenKind::Minus => {
                 self.advance();
                 let (name, name_span) = self.expect_ident("feature name")?;
                 let span = tok.span.merge(name_span);
+                if name == "stressed" {
+                    return Ok(FeatureEntry::new(
+                        FeatureField::Stress,
+                        FeatureValue::Stress(ParsedStress::Exact(Stress::Unstressed)),
+                        span,
+                    ));
+                }
                 if let Some(field) = parse_bool_field(&name) {
                     return Ok(FeatureEntry::new(field, FeatureValue::Bool(false), span));
                 }
@@ -1208,7 +1374,33 @@ impl Parser {
                         },
                         span,
                     )),
+                    "stress" => Err(DslError::new(
+                        DslErrorKind::InvalidFeatureValue {
+                            field: "stress".to_owned(),
+                            value: "-stress".to_owned(),
+                        },
+                        span,
+                    )),
                     _ => {
+                        if let Some((var_name, field)) = parse_prefixed_greek_var(&name) {
+                            if field.is_bool() {
+                                return Ok(FeatureEntry::new(
+                                    field,
+                                    FeatureValue::Var {
+                                        name: var_name,
+                                        polarity: VarPolarity::Opposite,
+                                    },
+                                    span,
+                                ));
+                            }
+                            return Err(DslError::new(
+                                DslErrorKind::InvalidFeatureValue {
+                                    field: field.name().to_owned(),
+                                    value: format!("-{var_name}"),
+                                },
+                                span,
+                            ));
+                        }
                         if let Some(variant) = parse_enum_variant(&name) {
                             return Err(DslError::new(
                                 DslErrorKind::InvalidFeatureValue {
@@ -1226,8 +1418,50 @@ impl Parser {
                 self.advance();
                 if matches!(self.peek_kind(), TokenKind::Equals) {
                     self.advance();
+                    if matches!(self.peek_kind(), TokenKind::Minus) {
+                        self.advance();
+                        let (val, val_span) = self.expect_ident("feature variable")?;
+                        let full_span = tok.span.merge(val_span);
+                        let Some(field) = parse_field_name(&name) else {
+                            return Err(DslError::new(
+                                DslErrorKind::UnknownFeature(name),
+                                tok.span,
+                            ));
+                        };
+                        if let Some(var_name) = parse_explicit_var_name(&val)
+                            && field.is_bool()
+                        {
+                            return Ok(FeatureEntry::new(
+                                field,
+                                FeatureValue::Var {
+                                    name: var_name,
+                                    polarity: VarPolarity::Opposite,
+                                },
+                                full_span,
+                            ));
+                        }
+                        return Err(DslError::new(
+                            DslErrorKind::InvalidFeatureValue {
+                                field: name,
+                                value: format!("-{val}"),
+                            },
+                            full_span,
+                        ));
+                    }
                     let (val, val_span) = self.expect_ident("feature value")?;
                     let span = tok.span.merge(val_span);
+                    if let Some(field) = parse_field_name(&name)
+                        && let Some(var_name) = parse_explicit_var_name(&val)
+                    {
+                        return Ok(FeatureEntry::new(
+                            field,
+                            FeatureValue::Var {
+                                name: var_name,
+                                polarity: VarPolarity::Same,
+                            },
+                            span,
+                        ));
+                    }
                     return parse_assigned_feature(&name, &val, tok.span, span);
                 }
                 if let Some(variant) = parse_enum_variant(&name) {
@@ -1237,8 +1471,21 @@ impl Parser {
                         tok.span,
                     ));
                 }
+                if let Some((var_name, field)) = parse_prefixed_greek_var(&name) {
+                    return Ok(FeatureEntry::new(
+                        field,
+                        FeatureValue::Var {
+                            name: var_name,
+                            polarity: VarPolarity::Same,
+                        },
+                        tok.span,
+                    ));
+                }
                 if parse_bool_field(&name).is_some()
-                    || matches!(name.as_str(), "manner" | "place" | "height" | "backness")
+                    || matches!(
+                        name.as_str(),
+                        "manner" | "place" | "height" | "backness" | "stress" | "stressed"
+                    )
                 {
                     return Err(DslError::new(
                         DslErrorKind::UnexpectedToken {
@@ -1265,6 +1512,103 @@ impl Parser {
             )),
         }
     }
+}
+
+fn entries_to_pattern(entries: Vec<FeatureEntry>) -> Pattern {
+    let mut fp = FeaturePattern::new();
+    let mut stress = StressMatch::Any;
+    let mut vars = Vec::new();
+    for entry in entries {
+        match (entry.field, entry.value) {
+            (FeatureField::Manner, FeatureValue::Manner(m)) => fp.manner = Some(m),
+            (FeatureField::Place, FeatureValue::Place(Some(p))) => {
+                fp.place = FieldMatch::Is(p);
+            }
+            (FeatureField::Place, FeatureValue::Place(None)) => {
+                fp.place = FieldMatch::IsNone;
+            }
+            (FeatureField::Height, FeatureValue::Height(Some(h))) => {
+                fp.height = FieldMatch::Is(h);
+            }
+            (FeatureField::Height, FeatureValue::Height(None)) => {
+                fp.height = FieldMatch::IsNone;
+            }
+            (FeatureField::Backness, FeatureValue::Backness(Some(b))) => {
+                fp.backness = FieldMatch::Is(b);
+            }
+            (FeatureField::Backness, FeatureValue::Backness(None)) => {
+                fp.backness = FieldMatch::IsNone;
+            }
+            (FeatureField::Voiced, FeatureValue::Bool(v)) => fp.voiced = Some(v),
+            (FeatureField::Aspirated, FeatureValue::Bool(v)) => fp.aspirated = Some(v),
+            (FeatureField::Palatalized, FeatureValue::Bool(v)) => fp.palatalized = Some(v),
+            (FeatureField::Labialized, FeatureValue::Bool(v)) => fp.labialized = Some(v),
+            (FeatureField::Rounded, FeatureValue::Bool(v)) => fp.rounded = Some(v),
+            (FeatureField::Syllabic, FeatureValue::Bool(v)) => fp.syllabic = Some(v),
+            (FeatureField::Long, FeatureValue::Bool(v)) => fp.long = Some(v),
+            (FeatureField::Stress, FeatureValue::Stress(ps)) => stress = ps.to_match(),
+            (field, FeatureValue::Var { name, polarity }) => vars.push(FeatureVar {
+                field,
+                name,
+                polarity,
+            }),
+            _ => {}
+        }
+    }
+    if stress == StressMatch::Any && vars.is_empty() {
+        Pattern::Features(fp)
+    } else {
+        Pattern::Constrained(ConstrainedPattern {
+            base: PatternBase::Features(fp),
+            stress,
+            vars,
+        })
+    }
+}
+
+fn entries_to_non_feature_constraints(
+    entries: Vec<FeatureEntry>,
+) -> Result<(StressMatch, Vec<FeatureVar>), DslError> {
+    let mut stress = StressMatch::Any;
+    let mut vars = Vec::new();
+    for entry in entries {
+        match (entry.field, entry.value) {
+            (FeatureField::Stress, FeatureValue::Stress(ps)) => stress = ps.to_match(),
+            (field, FeatureValue::Var { name, polarity }) => vars.push(FeatureVar {
+                field,
+                name,
+                polarity,
+            }),
+            _ => {
+                return Err(DslError::new(
+                    DslErrorKind::FeaturesOnNonFeaturePattern,
+                    entry.span,
+                ));
+            }
+        }
+    }
+    Ok((stress, vars))
+}
+
+fn entries_to_literal_stress(entries: Vec<FeatureEntry>) -> Result<LiteralStress, DslError> {
+    let mut stress = LiteralStress::Inherit;
+    for entry in entries {
+        match (entry.field, entry.value) {
+            (FeatureField::Stress, FeatureValue::Stress(ps)) => {
+                stress = LiteralStress::Set(ps.to_stress());
+            }
+            (FeatureField::Stress, FeatureValue::Var { name, .. }) => {
+                stress = LiteralStress::Var(name);
+            }
+            _ => {
+                return Err(DslError::new(
+                    DslErrorKind::FeaturesOnLiteralReplacement,
+                    entry.span,
+                ));
+            }
+        }
+    }
+    Ok(stress)
 }
 
 fn parse_assigned_feature(
@@ -1357,6 +1701,30 @@ fn parse_assigned_feature(
                 ))
             }
         }
+        "stress" => match value_name {
+            "unstressed" => Ok(FeatureEntry::new(
+                FeatureField::Stress,
+                FeatureValue::Stress(ParsedStress::Exact(Stress::Unstressed)),
+                full_span,
+            )),
+            "primary" => Ok(FeatureEntry::new(
+                FeatureField::Stress,
+                FeatureValue::Stress(ParsedStress::Exact(Stress::Primary)),
+                full_span,
+            )),
+            "secondary" => Ok(FeatureEntry::new(
+                FeatureField::Stress,
+                FeatureValue::Stress(ParsedStress::Exact(Stress::Secondary)),
+                full_span,
+            )),
+            _ => Err(DslError::new(
+                DslErrorKind::InvalidFeatureValue {
+                    field: "stress".to_owned(),
+                    value: value_name.to_owned(),
+                },
+                full_span,
+            )),
+        },
         other => {
             if let Some(field) = parse_bool_field(other) {
                 return match value_name {
@@ -1911,5 +2279,216 @@ mod tests {
 
         // A leading UTF-8 BOM is ignored.
         assert!(parse_program("\u{FEFF}segment a = [vowel]").is_ok());
+    }
+
+    #[test]
+    fn parses_m5_stress_variables_multi_context_and_optional()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dsl = r#"
+            segment p = [stop, bilabial, -voiced]
+            segment t = [stop, alveolar, -voiced]
+            segment k = [stop, velar, -voiced]
+            segment d = [stop, alveolar, +voiced]
+            segment m = [nasal, bilabial, +voiced]
+            segment n = [nasal, alveolar, +voiced]
+            segment ŋ = [nasal, velar, +voiced]
+            segment r = [rhotic, alveolar, +voiced]
+            segment j = [approximant, palatal, +voiced]
+            segment a = [vowel, low, central]
+            segment e = [vowel, mid-high, front]
+            segment ɛ = [vowel, mid-low, front]
+
+            class V = { a, e, ɛ }
+            class C = { p, t, k, d, m, n, ŋ, r, j }
+
+            rule diph:
+              ɛ[+stressed] > j e[+stressed]
+
+            rule assim:
+              [nasal] > [αplace] / _ [stop, αplace]
+
+            rule copy_stress_at:
+              e > a[stress=@s] / _ [vowel, stress=@s]
+
+            rule syncope:
+              V[-stressed] > ∅ / C (r) _ C V |
+                               V C _ C #
+
+            rule leading_pipe:
+              a > e / p _ #
+                    | k _ #
+        "#;
+        let program = parse_program(dsl)?;
+        program.validate_against(&program.inventory)?;
+
+        assert_eq!(program.rules[0].target().len(), 1);
+        assert_eq!(
+            program.rules[0].replacement(),
+            &[
+                ReplacementItem::Literal("j".to_owned()),
+                ReplacementItem::LiteralWithStress {
+                    symbol: "e".to_owned(),
+                    stress: LiteralStress::Set(Stress::Primary),
+                },
+            ]
+        );
+        assert_eq!(program.rules[3].environments().len(), 2);
+        assert_eq!(program.rules[4].environments().len(), 2);
+
+        // Space-delimited literal + feature block remains two separate target/replacement items.
+        let spaced_target = parse_program("rule split_t:\n  a [+stressed] > a e\n")?;
+        assert_eq!(spaced_target.rules[0].target().len(), 2);
+        assert_eq!(
+            spaced_target.rules[0].target()[0],
+            Pattern::Literal("a".to_owned())
+        );
+
+        let spaced_repl = parse_program("rule split_r:\n  a > e [+stressed]\n")?;
+        assert_eq!(spaced_repl.rules[0].replacement().len(), 2);
+        assert_eq!(
+            spaced_repl.rules[0].replacement()[0],
+            ReplacementItem::Literal("e".to_owned())
+        );
+
+        // Multi-context and optional inside `stage` on one line (`allow_rbrace_end`).
+        let staged = parse_program("stage s { rule r: a > e / (p) _ # | _ k }")?;
+        let tree = staged.dialect_tree.as_ref().ok_or("expected tree")?;
+        let node = tree.node("s").ok_or("expected stage s")?;
+        assert_eq!(node.rules()[0].environments().len(), 2);
+
+        // Positive and negated Greek/`@` variable forms parse symmetrically.
+        let vars_ok = parse_program(
+            "rule v1:\n  [+stop, +αvoiced] > [voiced=-α]\n\
+             rule v2:\n  [+stop, place=@p, voiced=-@v] > [place=@p, voiced=@v]\n\
+             rule v3:\n  [+stop, stress=secondary] > $1[stress=primary]\n\
+             rule v4:\n  a > e[αstress] / _ [vowel, αstress]\n",
+        )?;
+        assert_eq!(vars_ok.rules.len(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_m5_dsl_and_semantic_errors_with_exact_kinds() {
+        assert!(matches!(
+            parse_program("segment a = [vowel, +stressed]"),
+            Err(DslError {
+                kind: DslErrorKind::StressInSegmentDecl,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("segment p = [stop, αplace]"),
+            Err(DslError {
+                kind: DslErrorKind::VariableInSegmentDecl(v),
+                ..
+            }) if v == "α"
+        ));
+        assert!(matches!(
+            parse_program("segment p = [stop, place=@p]"),
+            Err(DslError {
+                kind: DslErrorKind::VariableInSegmentDecl(v),
+                ..
+            }) if v == "@p"
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  a[+voiced] > e"),
+            Err(DslError {
+                kind: DslErrorKind::FeaturesOnNonFeaturePattern,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  a > e[+long]"),
+            Err(DslError {
+                kind: DslErrorKind::FeaturesOnLiteralReplacement,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  [stop, -αplace] > a"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidFeatureValue { field, .. },
+                ..
+            }) if field == "place"
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  [stop, place=-@p] > a"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidFeatureValue { field, .. },
+                ..
+            }) if field == "place"
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  [+stressed, -stressed] > a"),
+            Err(DslError {
+                kind: DslErrorKind::DuplicateFeature(f),
+                ..
+            }) if f == "stress"
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  a > e / (#) _"),
+            Err(DslError {
+                kind: DslErrorKind::UnexpectedToken { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  a > e / () _"),
+            Err(DslError {
+                kind: DslErrorKind::UnexpectedToken { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  a > e / (p t) _"),
+            Err(DslError {
+                kind: DslErrorKind::UnexpectedToken { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  a > e / (p)* _"),
+            Err(DslError {
+                kind: DslErrorKind::UnexpectedToken { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  a > e / p _ | k"),
+            Err(DslError {
+                kind: DslErrorKind::MissingContextFocus,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  ∅ > e / (p) _"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidRule(RuleError::UnconstrainedInsertion { .. }),
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_program("rule r:\n  [nasal] > [αplace] / _ ([stop, αplace])"),
+            Err(DslError {
+                kind: DslErrorKind::InvalidRule(RuleError::UnboundVariable { .. }),
+                ..
+            })
+        ));
+
+        // Automatic validate_against catches unknown symbols in M5 constructs too.
+        for bad in [
+            "segment a = [vowel]\nrule r:\n  x[+stressed] > a",
+            "segment a = [vowel]\nrule r:\n  a > x[+stressed]",
+            "segment a = [vowel]\nrule r:\n  a > a / (x) _",
+            "segment a = [vowel]\nrule r:\n  a > a / a _ | x _",
+        ] {
+            assert!(matches!(
+                parse_program(bad),
+                Err(DslError {
+                    kind: DslErrorKind::UnknownSymbol(sym),
+                    ..
+                }) if sym == "x"
+            ));
+        }
     }
 }

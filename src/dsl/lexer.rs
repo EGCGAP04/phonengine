@@ -55,6 +55,8 @@ pub(crate) enum TokenKind {
     Plus,
     /// `-`
     Minus,
+    /// `|`
+    Pipe,
     /// Logical line terminator (`\n` or `\r\n`).
     Newline,
     /// End of input.
@@ -88,6 +90,7 @@ impl fmt::Display for TokenKind {
             Self::Star => f.write_str("'*'"),
             Self::Plus => f.write_str("'+'"),
             Self::Minus => f.write_str("'-'"),
+            Self::Pipe => f.write_str("'|'"),
             Self::Newline => f.write_str("newline"),
             Self::Eof => f.write_str("end of input"),
         }
@@ -127,6 +130,7 @@ fn is_ident_char(ch: char) -> bool {
                 | '+'
                 | '-'
                 | '$'
+                | '|'
                 | '"'
                 | ';'
                 | '∅'
@@ -367,6 +371,7 @@ pub(crate) fn lex(source: &str) -> Result<Vec<Token>, DslError> {
             '*' => Token::new(TokenKind::Star, single_span),
             '+' => Token::new(TokenKind::Plus, single_span),
             '-' => Token::new(TokenKind::Minus, single_span),
+            '|' => Token::new(TokenKind::Pipe, single_span),
             ';' => {
                 return Err(DslError::new(
                     DslErrorKind::UnexpectedChar(';'),
@@ -543,6 +548,57 @@ mod tests {
                 TokenKind::Eof,
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn lexes_m5_pipe_optional_stress_and_alpha_variables() -> Result<(), DslError> {
+        let tokens = lex(
+            "V[+stressed] > e[+stressed] / (r) _ [αplace, -αvoiced, place=@p, voiced=-@v] | _ #",
+        )?;
+        let kinds: Vec<TokenKind> = tokens.iter().map(|t| t.kind.clone()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Ident("V".to_owned()),
+                TokenKind::LBracket,
+                TokenKind::Plus,
+                TokenKind::Ident("stressed".to_owned()),
+                TokenKind::RBracket,
+                TokenKind::Gt,
+                TokenKind::Ident("e".to_owned()),
+                TokenKind::LBracket,
+                TokenKind::Plus,
+                TokenKind::Ident("stressed".to_owned()),
+                TokenKind::RBracket,
+                TokenKind::Slash,
+                TokenKind::LParen,
+                TokenKind::Ident("r".to_owned()),
+                TokenKind::RParen,
+                TokenKind::Underscore,
+                TokenKind::LBracket,
+                TokenKind::Ident("αplace".to_owned()),
+                TokenKind::Comma,
+                TokenKind::Minus,
+                TokenKind::Ident("αvoiced".to_owned()),
+                TokenKind::Comma,
+                TokenKind::Ident("place".to_owned()),
+                TokenKind::Equals,
+                TokenKind::Ident("@p".to_owned()),
+                TokenKind::Comma,
+                TokenKind::Ident("voiced".to_owned()),
+                TokenKind::Equals,
+                TokenKind::Minus,
+                TokenKind::Ident("@v".to_owned()),
+                TokenKind::RBracket,
+                TokenKind::Pipe,
+                TokenKind::Underscore,
+                TokenKind::Hash,
+                TokenKind::Eof,
+            ]
+        );
+        assert_eq!(tokens[0].span.end, tokens[1].span.start);
+        assert_eq!(tokens[6].span.end, tokens[7].span.start);
         Ok(())
     }
 }

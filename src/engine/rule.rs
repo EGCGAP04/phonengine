@@ -262,7 +262,8 @@ impl From<FeatureMutation> for SegmentMutation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplacementItem {
     /// Emits the segment registered under this symbol in the inventory, inheriting stress by
-    /// position unless a `Mutate` already copies that source index.
+    /// position unless a `Mutate` already copies that source index or another item in the same
+    /// replacement explicitly assigns stress (`LiteralStress::Set(Primary | Secondary)` or `Var`).
     Literal(String),
     /// Emits the segment registered under `symbol` with explicit or inherited [`LiteralStress`].
     LiteralWithStress {

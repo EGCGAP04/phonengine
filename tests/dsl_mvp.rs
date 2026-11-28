@@ -275,3 +275,92 @@ fn parses_and_validates_complete_spec_example() -> Result<(), Box<dyn std::error
     );
     Ok(())
 }
+
+#[test]
+fn dsl_m5_executes_stress_alpha_variables_multi_context_and_optional()
+-> Result<(), Box<dyn std::error::Error>> {
+    let m5_dsl = r#"
+        segment p = [stop, bilabial, -voiced]
+        segment b = [stop, bilabial, +voiced]
+        segment t = [stop, alveolar, -voiced]
+        segment d = [stop, alveolar, +voiced]
+        segment k = [stop, velar, -voiced]
+        segment g = [stop, velar, +voiced]
+        segment m = [nasal, bilabial, +voiced]
+        segment n = [nasal, alveolar, +voiced]
+        segment ŋ = [nasal, velar, +voiced]
+        segment r = [rhotic, alveolar, +voiced]
+        segment j = [approximant, palatal, +voiced]
+        segment a = [vowel, low, central]
+        segment e = [vowel, mid-high, front]
+        segment ɛ = [vowel, mid-low, front]
+        segment i = [vowel, high, front]
+
+        class V = { a, e, ɛ, i }
+        class C = { p, b, t, d, k, g, m, n, ŋ, r, j }
+
+        stage proto {}
+
+        stage west from proto {
+          // Stress-conditioned diphthongization preserves stress only on nuclear vowel
+          rule open_mid_diph:
+            ɛ[+stressed] > j e[+stressed]
+
+          // Unstressed syncope across multiple contexts and optional (r)
+          rule unstressed_syncope:
+            i[-stressed] > ∅ / C (r) _ C V |
+                               V C _ #
+
+          // Homorganic nasal assimilation using Greek α notation
+          rule nasal_place_assim:
+            [nasal] > [αplace] / _ [stop, αplace]
+
+          // Voicing assimilation using explicit @ syntax before stop
+          rule stop_voicing_assim:
+            [stop] > [voiced=@v] / _ [stop, voiced=@v]
+        }
+    "#;
+
+    let program = parse_program(m5_dsl)?;
+    program.validate_against(&program.inventory)?;
+    let tree = program
+        .dialect_tree
+        .as_ref()
+        .ok_or("expected dialect tree")?;
+
+    // `pˈɛtra` -> `pjˈetra` (stressed ɛ diphthongizes, unstressed `a` stays)
+    let w1 = tokenize_word("pˈɛtra", &program.inventory)?;
+    assert_eq!(
+        tree.derive_stage(&w1, "west", &program.inventory)?
+            .final_word()
+            .to_spaced(),
+        "p j ˈe t r a"
+    );
+
+    // `ˈpɛnkrati` -> diph `ˈpɛ` + syncope final `i` (branch 2 `V C _ #`) + `n` > `ŋ` before `k`
+    let w2 = tokenize_word("pˈɛnkrati", &program.inventory)?;
+    assert_eq!(
+        tree.derive_stage(&w2, "west", &program.inventory)?
+            .final_word()
+            .to_spaced(),
+        "p j ˈe ŋ k r a t"
+    );
+
+    // `tˈepd` + syncope across `(r)` (`p r i t a` -> `p r t a`) + `t` > `d` before `d`
+    let w3 = tokenize_word("prˈitatd", &program.inventory)?;
+    assert_eq!(
+        tree.derive_stage(&w3, "west", &program.inventory)?
+            .final_word()
+            .to_spaced(),
+        "p r ˈi t a d d"
+    );
+
+    let w4 = tokenize_word("prˈiripa", &program.inventory)?;
+    assert_eq!(
+        tree.derive_stage(&w4, "west", &program.inventory)?
+            .final_word()
+            .to_spaced(),
+        "p r ˈi r p a"
+    );
+    Ok(())
+}

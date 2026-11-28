@@ -725,8 +725,9 @@ fn append_replacement(
 /// Returns the stress inherited by a literal at `position` of `replacement`.
 ///
 /// That is the stress of `matched[position]`, unless no such segment exists (epenthesis or a
-/// longer replacement) or a [`ReplacementItem::Mutate`] of the same replacement already carries
-/// that segment's stress.
+/// longer replacement), a [`ReplacementItem::Mutate`] of the same replacement copies that source
+/// index, or another item in the same replacement assigns stress explicitly via
+/// [`LiteralStress::Set`] (`Primary` / `Secondary`) or [`LiteralStress::Var`].
 fn inherited_stress(
     replacement: &[ReplacementItem],
     matched: &[Segment],
@@ -735,8 +736,18 @@ fn inherited_stress(
     let copied_by_mutation = replacement.iter().any(|item| {
         matches!(item, ReplacementItem::Mutate { source_index, .. } if *source_index == position)
     });
+    let explicit_stress_assigned = replacement.iter().any(|item| {
+        matches!(
+            item,
+            ReplacementItem::LiteralWithStress {
+                stress: LiteralStress::Set(Stress::Primary | Stress::Secondary)
+                    | LiteralStress::Var(_),
+                ..
+            }
+        )
+    });
     match matched.get(position) {
-        Some(source) if !copied_by_mutation => source.stress,
+        Some(source) if !copied_by_mutation && !explicit_stress_assigned => source.stress,
         _ => Stress::Unstressed,
     }
 }
@@ -1502,6 +1513,30 @@ mod tests {
         assert_eq!(
             apply_rule(&Word::from_spaced("t ˌe n", &inv)?, &diph, &inv)?.to_spaced(),
             "t j ˈe n"
+        );
+
+        // Plain `Literal("j")` followed by `e[+stressed]` does not double-stress `j`.
+        let diph_plain_j = Rule::new(
+            "R_STRESS_DIPH_PLAIN",
+            "Diphthongize stressed e with plain literal j",
+            vec![Pattern::Constrained(
+                ConstrainedPattern::new(PatternBase::Literal("e".to_owned()))
+                    .with_stress(StressMatch::Stressed),
+            )],
+            vec![
+                ReplacementItem::Literal("j".to_owned()),
+                ReplacementItem::LiteralWithStress {
+                    symbol: "e".to_owned(),
+                    stress: LiteralStress::Set(Stress::Primary),
+                },
+            ],
+            vec![],
+            vec![],
+            ApplicationMode::Simultaneous,
+        )?;
+        assert_eq!(
+            apply_rule(&Word::from_spaced("t ˈe n e", &inv)?, &diph_plain_j, &inv)?.to_spaced(),
+            "t j ˈe n e"
         );
 
         // Exact StressMatch::Is(Secondary) vs StressUpdate::Set(Unstressed) and LiteralStress::Var.
