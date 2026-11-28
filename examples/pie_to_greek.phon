@@ -1,0 +1,124 @@
+// Proto-Indo-European to Ancient Greek dialects
+// Models: pie -> proto_greek -> { attic_ionic -> { attic, ionic }, doric }
+// Exercises M5 `@` alpha variables, multi-context `|` branches, optional `(X)` contexts,
+// non-local Grassmann's Law, and directional interactions.
+
+// --- Segment Inventory (33 segments, strictly bijective) ---
+
+// Vowels (10)
+segment a  = [vowel, low, central]
+segment aː = [vowel, low, central, +long]
+segment e  = [vowel, mid-high, front]
+segment eː = [vowel, mid-high, front, +long]
+segment i  = [vowel, high, front]
+segment iː = [vowel, high, front, +long]
+segment o  = [vowel, mid-high, back, +rounded]
+segment oː = [vowel, mid-high, back, +rounded, +long]
+segment u  = [vowel, high, back, +rounded]
+segment uː = [vowel, high, back, +rounded, +long]
+
+// Stops (16)
+segment p   = [stop, bilabial, -voiced]
+segment b   = [stop, bilabial, +voiced]
+segment pʰ  = [stop, bilabial, -voiced, +aspirated]
+segment bʰ  = [stop, bilabial, +voiced, +aspirated]
+
+segment t   = [stop, alveolar, -voiced]
+segment d   = [stop, alveolar, +voiced]
+segment tʰ  = [stop, alveolar, -voiced, +aspirated]
+segment dʰ  = [stop, alveolar, +voiced, +aspirated]
+
+segment k   = [stop, velar, -voiced]
+segment g   = [stop, velar, +voiced]
+segment kʰ  = [stop, velar, -voiced, +aspirated]
+segment gʰ  = [stop, velar, +voiced, +aspirated]
+
+segment kʷ  = [stop, velar, -voiced, +labialized]
+segment gʷ  = [stop, velar, +voiced, +labialized]
+segment kʷʰ = [stop, velar, -voiced, +aspirated, +labialized]
+segment gʷʰ = [stop, velar, +voiced, +aspirated, +labialized]
+
+// Fricatives, nasals, liquids, and approximants (7)
+segment s = [fricative, alveolar, -voiced]
+segment h = [fricative, glottal, -voiced]
+
+segment m = [nasal, bilabial, +voiced]
+segment n = [nasal, alveolar, +voiced]
+
+segment l = [lateral, alveolar, +voiced]
+segment r = [rhotic, alveolar, +voiced]
+
+segment w = [approximant, velar, +voiced, +labialized]
+
+// --- Natural Classes ---
+
+class V      = { a, aː, e, eː, i, iː, o, oː, u, uː }
+class FrontV = { e, eː, i, iː }
+
+// --- Dialect Tree ---
+
+stage pie "Proto-Indo-European" {}
+
+stage proto_greek "Proto-Greek" from pie {
+  rule devoicing_aspirates "Devoicing of PIE voiced aspirates":
+    [stop, +voiced, +aspirated] > [-voiced]
+
+  // Must precede Grassmann's Law so final -s deaspiration bleeds it (dʰrˈigʰs -> tʰrˈiks).
+  rule stop_before_s "Devoicing and deaspiration of stops before /s/":
+    [stop] > [-voiced, -aspirated] / _ s
+
+  rule stop_cluster_assim "Regressive stop voicing and aspiration assimilation":
+    [stop] > [voiced=@v, aspirated=@a] / _ [stop, voiced=@v, aspirated=@a]
+
+  // Requires an intervening vowel so adjacent aspirates (lˈepʰtʰeːn) stay aspirated.
+  rule grassmann "Grassmann's Law" (left-to-right):
+    [stop, +aspirated] > [-aspirated] / _ [-aspirated]* V [-aspirated]* [+aspirated]
+
+  rule s_debuccalization "Proto-Greek *s debuccalization":
+    s > h / # _ V |
+            V _ V
+
+  rule intervocalic_h_loss "Loss of intervocalic /h/":
+    h > ∅ / V _ V
+
+  rule labiovelar_to_dental "Labiovelar dentalization before front vowel":
+    [stop, velar, +labialized] > [alveolar, -labialized] / _ FrontV
+
+  rule labiovelar_delabialization "Labiovelar delabialization adjacent to /u/":
+    [stop, velar, +labialized] > [-labialized] / _ u |
+                                                 u _
+
+  rule labiovelar_to_labial "Default labiovelar labialization":
+    [stop, velar, +labialized] > [bilabial, -labialized]
+}
+
+stage attic_ionic "Proto-Attic-Ionic" from proto_greek {
+  rule a_raising "Attic-Ionic long /aː/ raising":
+    aː > eː
+
+  rule w_loss "Loss of digamma /w/":
+    w > ∅
+
+  rule assibilation "Attic-Ionic /t/ assibilation before /i/":
+    t > s / V (n) _ i
+
+  rule compensatory_lengthening "Compensatory lengthening before /ns/":
+    V n > $1[+long] / _ s
+}
+
+stage attic "Attic Greek" from attic_ionic {
+  rule alpha_purum "Attic alpha purum":
+    eː > aː / r _ |
+              i _ |
+              e _
+
+  rule attic_eo_contraction "Attic /eo/ hiatus contraction":
+    e o > oː
+}
+
+stage ionic "Ionic Greek" from attic_ionic {
+  rule psilosis "East Ionic psilosis":
+    h > ∅ / # _
+}
+
+stage doric "Doric Greek" from proto_greek {}

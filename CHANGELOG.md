@@ -12,11 +12,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Prosodic stress matching/mutations (`StressMatch`, `StressUpdate`, `LiteralStress`) and alpha feature variable types (`FeatureDomain`, `FeatureField`, `VarPolarity`, `FeatureVar`, `FeatureVarValue`, `VarBindings`) in `src/phonology/pattern.rs` and `src/lib.rs`.
 - Multi-context disjunctive `Environment`s (`Rule::with_environments`), `ContextElement::Optional`, `Pattern::Constrained` / `ConstrainedPattern` / `PatternBase`, `SegmentMutation`, `ReplacementItem::LiteralWithStress`, extended `RuleError` static validation, and deterministic closest-to-focus variable-binding DP matching in `src/engine/`.
 - DSL lexer, parser, and diagnostic support (`TokenKind::Pipe`, `StressInSegmentDecl`, `VariableInSegmentDecl`, `FeaturesOnNonFeaturePattern`, `FeaturesOnLiteralReplacement`) for prosodic stress specs, Greek and `@` alpha variables, postfix `[...]` modifiers, multi-context `|` branches, and optional `(<pattern>)` context elements in `src/dsl/`.
+- Historical dialect-tree grammar examples (`examples/latin_to_romance.phon` and `examples/pie_to_greek.phon`) and integration tests (`tests/examples.rs`) covering golden derivations and CLI invocation across all Milestone 5 features.
 - Opened GitHub milestones `M5: Phonological expressiveness` and `M6: Comparative reconstruction`, and added both to `.github/ISSUE_TEMPLATE/*.yml`, `AGENTS.md`, and `README.md`.
 
 ### Changed
 
 - Minor post-`v0.1.0` documentation wording cleanups in `README.md` and `SPEC.md`.
+- Updated `README.md` CLI usage examples to run against the bundled `examples/*.phon` grammars and marked Milestone 5 completed in `README.md` and `SPEC.md`.
 
 ## [0.1.0] - 2026-11-27
 

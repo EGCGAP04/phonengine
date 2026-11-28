@@ -25,15 +25,16 @@ cargo test
 ### CLI usage
 
 ```bash
-# Derive words through flat rules or a target dialect stage
-cargo run -- run rules.phon vitam fatam
-cargo run -- run greek.phon --stage attic -f json -w words.txt
+# Derive words through a target dialect stage
+cargo run -- run examples/latin_to_romance.phon --stage spanish pˈetram skˈolam fˈokum
+cargo run -- run examples/pie_to_greek.phon --stage attic -f json gʰˈoːraː sˈaːma
 
 # Trace every non-vacuous step (supports --spaced and Markdown export)
-cargo run -- trace rules.phon --spaced -f markdown "v i t a m"
+cargo run -- trace examples/latin_to_romance.phon --stage french --spaced -f markdown "p ˈe t r a m"
 
 # Compare outcomes across leaf dialects or explicit stages
-cargo run -- compare greek.phon --stages attic,ionic pʰˈaːtʰi
+cargo run -- compare examples/latin_to_romance.phon pˈetram skˈolam sˈeptem
+cargo run -- compare examples/pie_to_greek.phon --stages attic,ionic,doric sˈaːma gˈenesos bʰˈeronti
 ```
 
 ## Project structure
@@ -64,6 +65,9 @@ cargo run -- compare greek.phon --stages attic,ionic pʰˈaːtʰi
 ├── SECURITY.md
 ├── SPEC.md
 ├── clippy.toml
+├── examples/
+│   ├── latin_to_romance.phon
+│   └── pie_to_greek.phon
 ├── src/
 │   ├── cli/
 │   │   ├── args.rs
@@ -95,6 +99,7 @@ cargo run -- compare greek.phon --stages attic,ionic pʰˈaːtʰi
     ├── cli.rs
     ├── dialect_tree.rs
     ├── dsl_mvp.rs
+    ├── examples.rs
     ├── fixtures/
     │   └── golden_mvp.tsv
     └── golden_mvp.rs
@@ -107,7 +112,7 @@ cargo run -- compare greek.phon --stages attic,ionic pʰˈaːtʰi
 - [x] **M2**: DSL lexer/parser (`src/dsl/`) and maximal-munch tokenizer.
 - [x] **M3**: Dialect trees, chronological stages, directional modes, and non-local contexts.
 - [x] **M4**: CLI (`src/cli/`) with `clap` and Markdown/JSON export.
-- [ ] **M5**: Phonological expressiveness (stress-aware rules, alpha feature variables, multi-context/optional environments, and historical grammar examples).
+- [x] **M5**: Phonological expressiveness (stress-aware rules, alpha feature variables, multi-context/optional environments, and historical grammar examples).
 - [ ] **M6**: Comparative reconstruction (feature-based cognate alignment, sound correspondence tables, and proto-form verification).
 
 ## License
