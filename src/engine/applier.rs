@@ -15,17 +15,25 @@ use super::trace::{DerivationStep, DerivationTrace};
 /// Applies a single phonological `rule` to `word` using `inventory` without mutating inputs.
 ///
 /// Supports [`ApplicationMode::Simultaneous`], [`ApplicationMode::LeftToRight`], and
-/// [`ApplicationMode::RightToLeft`], as well as local and non-local (`ZeroOrMore`) contexts.
-/// A [`ReplacementItem::Mutate`] keeps the stress of its source segment, and a
-/// [`ReplacementItem::Literal`] inherits the stress of the matched segment at its own position
-/// unless a `Mutate` already copies that segment.
+/// [`ApplicationMode::RightToLeft`], multiple disjunctive [`Environment`] branches, local and
+/// [`ContextElement::Optional`] / [`ContextElement::ZeroOrMore`] contexts, prosodic
+/// [`StressUpdate`](crate::phonology::StressUpdate)s, and alpha-variable assimilation. A [`ReplacementItem::Mutate`] applies its
+/// [`StressUpdate`](crate::phonology::StressUpdate) (defaulting to `Keep`) on top of its source segment's stress, a
+/// [`ReplacementItem::LiteralWithStress`] applies its explicit [`LiteralStress`], and a
+/// [`ReplacementItem::Literal`] (or `LiteralStress::Inherit`) inherits the matched segment's stress
+/// at the same output position unless a `Mutate` copies that `source_index` or a sibling item in
+/// the same replacement explicitly assigns stress via [`LiteralStress::Set`]
+/// (`Primary` / `Secondary`) or [`LiteralStress::Var`].
 ///
 /// # Errors
 ///
-/// - [`EngineError::UnknownSymbol`] if a [`ReplacementItem::Literal`] symbol is missing from `inventory`.
-/// - [`EngineError::UnmappedFeatureBundle`] if a [`ReplacementItem::Mutate`] yields a bundle absent from `inventory`.
+/// - [`EngineError::UnknownSymbol`] if a [`ReplacementItem::Literal`] or
+///   [`ReplacementItem::LiteralWithStress`] symbol is missing from `inventory`.
+/// - [`EngineError::UnmappedFeatureBundle`] if a [`ReplacementItem::Mutate`] yields a bundle
+///   absent from `inventory`.
+/// - [`EngineError::InvalidRule`] defensively if rule invariants are violated during evaluation.
 ///
-/// Both errors carry the identifier of `rule`.
+/// Rule-level errors carry the identifier of `rule`.
 pub fn apply_rule(word: &Word, rule: &Rule, inventory: &Inventory) -> Result<Word, EngineError> {
     match rule.mode() {
         ApplicationMode::Simultaneous => apply_simultaneous(word, rule, inventory),

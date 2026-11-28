@@ -483,7 +483,8 @@ impl StressUpdate {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub enum LiteralStress {
     /// Inherits the stress of the matched target segment at the same output position
-    /// (falling back to [`Stress::Unstressed`] if unmapped or already copied by `Mutate`).
+    /// (falling back to [`Stress::Unstressed`] if unmapped, copied by `Mutate`, or suppressed by
+    /// an explicit stress assignment on a sibling item).
     #[default]
     Inherit,
     /// Emits the segment with an explicit [`Stress`] level.

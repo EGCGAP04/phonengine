@@ -10,9 +10,9 @@ use crate::phonology::{FeatureBundle, FeatureDomain, FeatureField};
 pub enum RuleError {
     /// Rule identifier is empty or whitespace-only.
     EmptyId,
-    /// Rule inserts segments (`target` is empty) without an anchoring context: neither
-    /// `left_context` nor `right_context` contains a `WordBoundary` or a `Segment` element
-    /// (contexts made only of `ZeroOrMore` match at every gap).
+    /// Rule inserts segments (`target` is empty) without an anchoring context: `environments` is
+    /// empty or at least one branch lacks a `WordBoundary` or `Segment` element (contexts made only
+    /// of `ZeroOrMore` and `Optional` match at every gap and cannot anchor insertions).
     UnconstrainedInsertion {
         /// Identifier of the invalid rule.
         rule_id: String,

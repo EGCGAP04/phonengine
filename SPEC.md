@@ -190,7 +190,7 @@ El parser *recursive descent* manual expone `parse_program(source: &str) -> Resu
 - `rules: Vec<Rule>`: lista ordenada de reglas de nivel superior (vacía si el archivo define etapas `stage`).
 - `dialect_tree: Option<DialectTree>`: `Some(tree)` si el archivo declara bloques `stage`, o `None` si usa reglas planas de nivel superior.
 
-Adicionalmente, `Program::validate_against(&self, inventory: &Inventory) -> Result<(), DslError>` verifica que todos los símbolos literales usados en `class`, `Pattern::Literal` y `ReplacementItem::Literal` (tanto en reglas de nivel superior como dentro de etapas `stage`) existan en un `Inventory` dado.
+Adicionalmente, `Program::validate_against(&self, inventory: &Inventory) -> Result<(), DslError>` verifica que todos los símbolos literales usados en `class`, `Pattern::Literal`, `PatternBase::Literal`, `ReplacementItem::Literal` y `ReplacementItem::LiteralWithStress` (tanto en reglas de nivel superior como dentro de etapas `stage`) existan en un `Inventory` dado.
 - **Validación automática**: si el programa declara al menos un `segment`, `parse_program` ejecuta `validate_against(&inventory)` sobre ese inventario antes de devolverlo. Si no declara ninguno (inventario externo), quien llama debe ejecutar `validate_against` con el inventario que vaya a usar.
 - **Clases usadas antes de declararse**: si un símbolo desconocido de un patrón (`target` o contexto) coincide con el nombre de una `class` declarada más adelante, el error es `DslErrorKind::ClassUsedBeforeDeclaration(String)` en lugar de `UnknownSymbol`.
 - `validate_against` revisa los símbolos registrados durante el parseo: las reglas que se agreguen o modifiquen después en `Program` no se revalidan.
